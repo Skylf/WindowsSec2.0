@@ -1,0 +1,40 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+
+# === 虚拟环境 ===
+.venv/
+venv/
+env/
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# === 模型文件 ===
+# 模型使用 Git LFS 管理(见 .gitattributes),不在此忽略
+
+# === 构建产物 ===
+build/
+dist/
+*.spec
+
+# === 日志与临时文件 ===
+*.log
+logs/
+temp/
+
+# === 缓存目录(采集的原始图片等,不进 git) ===
+cache/
+
+# === 临时测试结果与调试文件 ===
+test/a
+FaceMoudle/liveness/landmark_debug.jpg
