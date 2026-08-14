@@ -12,7 +12,7 @@
 
 与旧版区别:
   旧版"摄像头拍照识别"→ 拍一帧直接比对,照片/翻拍可欺骗
-  新版"活体检测识别"→ 先过 5 个动作,再提取识别帧比对,防照片攻击
+  新版"活体检测识别"→ 静默检测 + 自适应动作(随机1~5个),再采集正脸帧比对
 """
 import platform
 import sys
@@ -97,7 +97,7 @@ def selectRecognizeMode():
     """
     print("\n选择识别方式:")
     print("  1. 指定图片文件(传统方式,用于测试)")
-    print("  2. 【推荐】摄像头活体检测识别(左转→右转→抬头→眨眼→张嘴,防照片欺骗)")
+    print("  2. 【推荐】摄像头活体检测识别(静默+随机动作,防照片欺骗)")
     print("输入 /exit 退出")
     user_input = str(input("请输入数字(回车默认=2): "))
 
@@ -127,13 +127,13 @@ def selectTestImage():
 
 def setThreshold():
     """
-    设置相似度阈值(可选,默认 0.4)
+    设置相似度阈值(可选,默认 0.85)
     :return: 阈值<float>
     """
     print(f"\n当前默认阈值: {recognition.DEFAULT_THRESHOLD}")
-    print("  - 严格场景(安全门禁): 0.5-0.6")
-    print("  - 普通场景(考勤): 0.4-0.5")
-    print("  - 宽松场景(体验): 0.3-0.4")
+    print("  - 严格场景(安全门禁): 0.85(默认)")
+    print("  - 普通场景(考勤): 0.6-0.8")
+    print("  - 宽松场景(体验): 0.4-0.6")
     user_input = str(input("是否使用默认阈值?(回车=默认,或输入数值): "))
 
     if user_input == "" or user_input == "/exit":
@@ -167,7 +167,7 @@ def doRecognize(npyPath, img, threshold):
 def doLivenessRecognize(npyPath, threshold):
     """
     【推荐】摄像头活体检测 + 人脸识别
-    1. 先调用 recognition.runLivenessRecognize 跑活体检测流程(5 个动作)
+    1. 先调用 recognition.runLivenessRecognize 跑活体检测流程(静默+自适应动作)
     2. 活体通过后,从通过动作的帧中提取特征与注册特征比对
     (runLivenessRecognize 内部已封装好:活体检测 → 特征提取 → 相似度比对 → 阈值判定)
 
@@ -177,10 +177,10 @@ def doLivenessRecognize(npyPath, threshold):
              {"success": bool, "livenessPass": bool, "recognizeResult": {...原始识别结果...}}
     """
     # 调用 recognition 工具库新增的活体识别 API
-    # 该 API 内部:活体检测(静默+5动作)→ 通过 → 采集正脸帧 → 与注册特征比对
+    # 该 API 内部:活体检测(静默+自适应动作)→ 通过 → 采集正脸帧 → 与注册特征比对
     print("\n即将开始活体检测识别...")
-    print("按提示完成 5 个动作(左转→右转→抬头→眨眼→张嘴),每个动作 15 秒")
-    print("注意:未通过任何一个动作将直接判定识别失败")
+    print("静默检测通过后,需随机做 1~5 个动作完成验证")
+    print("注意:动作累计失败 2 次判定识别失败")
     time.sleep(2)
 
     result = recognition.runLivenessRecognize(npyPath, threshold=threshold)

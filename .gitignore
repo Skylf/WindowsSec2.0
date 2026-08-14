@@ -37,4 +37,5 @@ cache/
 
 # === 临时测试结果与调试文件 ===
 test/a
+test/b
 FaceMoudle/liveness/landmark_debug.jpg

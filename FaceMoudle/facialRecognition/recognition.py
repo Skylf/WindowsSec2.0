@@ -16,10 +16,10 @@
 技术要点:
 - 已注册特征(normed_embedding)和待识别特征(normed_embedding)都已 L2 归一化
 - 归一化向量的余弦相似度 = 点积(np.dot),范围 [-1, 1],越接近 1 越相似
-- 默认阈值 0.4(ArcFace 推荐值),可根据场景调整:
-  - 严格场景(安全门禁): 0.5-0.6
-  - 普通场景(考勤): 0.4-0.5
-  - 宽松场景(体验): 0.3-0.4
+- 默认阈值 0.85(严格安全场景),可根据场景调整:
+  - 严格场景(安全门禁): 0.85(默认)
+  - 普通场景(考勤): 0.6-0.8
+  - 宽松场景(体验): 0.4-0.6
 """
 
 # 标准库
@@ -34,8 +34,8 @@ from insightface.app import FaceAnalysis  # 人脸检测+识别模型
 # ====================================================================
 # 模块级常量
 # ====================================================================
-# 默认相似度阈值(ArcFace 推荐值 0.4,可根据场景调整)
-DEFAULT_THRESHOLD = 0.4
+# 默认相似度阈值(严格安全场景 0.85,可根据场景调整)
+DEFAULT_THRESHOLD = 0.85
 
 # ArcFace R50 模型输出的特征向量维度
 EMBEDDING_DIM = 512
@@ -216,7 +216,7 @@ def recognizeFace(registeredNpyPath, img, threshold=DEFAULT_THRESHOLD):
 
     :param registeredNpyPath: 已注册的 .npy 特征文件路径<str>
     :param img: 待识别图片(路径<str> 或 BGR 矩阵<np.ndarray>)
-    :param threshold: 相似度阈值<float>,默认 0.4,大于等于此值判定为匹配
+    :param threshold: 相似度阈值<float>,默认 0.85,大于等于此值判定为匹配
     :return: 识别结果字典<dict>,格式:
              {
                  "success": True/False,       # 是否识别成功(含人脸检测成功)
@@ -276,7 +276,7 @@ def recognizeFaceMulti(registeredNpyPaths, img, threshold=DEFAULT_THRESHOLD):
 
     :param registeredNpyPaths: 已注册的 .npy 特征文件路径列表<list<str>>
     :param img: 待识别图片(路径<str> 或 BGR 矩阵<np.ndarray>)
-    :param threshold: 相似度阈值<float>,默认 0.4
+    :param threshold: 相似度阈值<float>,默认 0.85
     :return: 识别结果字典<dict>,格式:
              {
                  "success": True/False,
@@ -355,7 +355,7 @@ def runLivenessRecognize(registeredNpyPath, threshold=DEFAULT_THRESHOLD):
     关键改进: 识别用"正脸帧"而非"动作帧",避免侧脸/表情帧导致相似度极低。
 
     :param registeredNpyPath: 已注册的 .npy 特征文件路径<str>
-    :param threshold: 相似度阈值<float>,默认 0.4
+    :param threshold: 相似度阈值<float>,默认 0.85
     :return: 综合结果字典<dict>,格式:
              {
                  "success": bool,               # 整体成功与否

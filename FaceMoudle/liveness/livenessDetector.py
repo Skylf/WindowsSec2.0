@@ -2,7 +2,7 @@
 """
 主动动作活体检测模块(livenessDetector)
 =======================================
-第二层防御: 要求用户按顺序完成 5 个动作(左转/右转/抬头/眨眼/张嘴),
+第二层防御: 静默检测通过后,随机做 1~5 个动作(左转/右转/抬头/眨眼/张嘴),
 通过连续多帧动作判定确认是真人(照片/视频无法完成动作)。
 
 关键改进(相对旧版 faceInputer/livenessDetector.py):
@@ -13,12 +13,13 @@
 
 技术依据:
 - 头部姿态: 直接使用 InsightFace 自带的 face.pose(基于 landmark_3d_68,准确可靠)
-- EAR(眨眼): 眼睛纵横比,眨眼时瞬间下降(左眼 35/36/37/39/41/42,右眼 89~96)
+- 眨眼: 眼睛区域灰度标准差法(睁眼有瞳孔+眼白差异大,闭眼均匀差异小)
 - MAR(张嘴): 嘴部纵横比,张嘴时增大(嘴巴外轮廓 52~71)
 """
 
 import os
 import time
+import random
 import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
@@ -64,6 +65,13 @@ BASELINE_DURATION = 1.5
 # 静默活体检测: 需要连续通过的帧数
 SILENT_PASS_FRAMES = 5
 
+# 自适应动作检测: 累计失败次数达到此值判定整体失败
+MAX_FAIL_COUNT = 2
+
+# 自适应动作检测: 继续下一个动作的概率(键=连续成功次数)
+CONTINUE_PROB_NO_FAIL = {1: 0.45, 2: 0.15}   # 无失败记录时
+CONTINUE_PROB_HAS_FAIL = {1: 0.30, 2: 0.10}  # 有失败记录时
+
 # 正脸采集: 动作通过后采集正脸时的相对偏移容差(度)
 FRONTAL_YAW_TOL = 10.0
 FRONTAL_PITCH_TOL = 8.0
@@ -103,7 +111,7 @@ class LivenessDetector:
     活体检测器(多层防御)
     =====================
     第一层: 静默活体检测(silentLiveness)拦截照片/屏幕翻拍
-    第二层: 主动动作检测(5 个动作)防止注入攻击与高级假体
+    第二层: 自适应动作检测(静默通过后随机 1~5 个动作)防止注入攻击与高级假体
 
     性能策略:
     - 动作检测阶段用轻量模型(detection + landmark_2d_106, det_size=160)
@@ -384,14 +392,17 @@ class LivenessDetector:
     def runSilentCheck(self, cap):
         """
         静默活体检测阶段(第一层防御)
-        连续采集多帧,每帧做人脸检测 + 静默判定,全部通过才进入动作阶段
+        连续采集多帧,每帧做人脸检测 + 静默判定,全部通过才判定为真人(非攻击)
         :param cap: cv2.VideoCapture 摄像头对象
-        :return: 是否通过静默检测<bool>
+        :return: {"passed": bool, "avgLogitDiff": float}
+                 passed=True 表示判定为真人(非攻击)
+                 avgLogitDiff 为通过帧的平均 logitDiff(仅作日志参考)
         """
         print("\n[静默活体检测] 请正对摄像头,勿做动作(拦截照片/翻拍)...")
         passCount = 0
         frameCount = 0
         start = time.time()
+        logitDiffs = []  # 通过帧的 logitDiff(real - spoof)
         # 静默阶段最长 8 秒
         while passCount < SILENT_PASS_FRAMES and time.time() - start < 8.0:
             ret, frame = cap.read()
@@ -403,7 +414,7 @@ class LivenessDetector:
             self._putText(display, f"Silent check: {passCount}/{SILENT_PASS_FRAMES}", (10, 30))
             cv2.imshow("Liveness", display)
             if cv2.waitKey(1) & 0xFF == 27:
-                return False
+                return {"passed": False, "avgLogitDiff": 0.0}
 
             # 跳帧降低 CPU 负担
             if frameCount % SKIP_FRAME_INTERVAL != 0:
@@ -418,52 +429,96 @@ class LivenessDetector:
             result = self.silentDetector.check(frame, bbox)
             if result["isReal"]:
                 passCount += 1
+                logitDiffs.append(result["detail"].get("logitDiff", 0.0))
             else:
                 passCount = 0  # 任一帧疑似假体则重新计数
+                logitDiffs = []
                 print(f"  [静默异常] {result['detail']}")
 
         if passCount >= SILENT_PASS_FRAMES:
-            print(f"  ✓ 静默活体检测通过({passCount} 帧)")
-            return True
+            avgLogitDiff = float(np.mean(logitDiffs)) if logitDiffs else 0.0
+            print(f"  ✓ 静默活体检测通过({passCount} 帧, 平均logitDiff={avgLogitDiff:.2f})")
+            return {"passed": True, "avgLogitDiff": avgLogitDiff}
         else:
             print(f"  ✗ 静默活体检测未通过({passCount}/{SILENT_PASS_FRAMES})")
-            return False
+            return {"passed": False, "avgLogitDiff": 0.0}
 
-    def runLivenessCheck(self, cap, collectFrontal=True):
+    def _detectSingleAction(self, cap, action, frame_queue, result_queue):
         """
-        执行完整活体检测流程(多层防御: 静默 + 主动动作)
-        ==================================================
-        1. 降低摄像头分辨率(缓解卡顿)
-        2. 静默活体检测(第一层)
-        3. 正面姿态基准校准
-        4. 主动动作检测(第二层,双线程)
-        5. (可选)动作通过后采集正脸帧,供后续识别使用
-
+        检测单个动作(双线程架构,供自适应动作检测复用)
         :param cap: cv2.VideoCapture 摄像头对象
-        :param collectFrontal: 动作通过后是否采集正脸帧<bool>,默认 True
-        :return: 结果字典<dict>:
-                 成功: {"success": True, "msg": "...", "frontalFrame": np.ndarray 或 None}
-                 失败: {"success": False, "step": str, "msg": "..."}
+        :param action: 动作名称<str>
+        :param frame_queue: 帧队列<queue.Queue>
+        :param result_queue: 结果队列<queue.Queue>
+        :return: (是否通过<bool>, 是否用户中断<bool>)
+        """
+        import queue
+
+        print(f"\n请{action}...")
+        actionPassed = False
+        start = time.time()
+        frameCount = 0
+
+        while time.time() - start < ACTION_TIMEOUT:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            frameCount += 1
+
+            # 显示节流: 每 DISPLAY_INTERVAL 帧才显示一次,降低 GUI 压力
+            if frameCount % DISPLAY_INTERVAL == 0:
+                display = frame.copy()
+                remaining = ACTION_TIMEOUT - (time.time() - start)
+                self._putText(display, f"Action: {action}", (10, 30))
+                self._putText(display, f"Time: {remaining:.1f}s", (10, 60))
+                cv2.imshow("Liveness", display)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    return False, True
+
+            # 每 SKIP_FRAME_INTERVAL 帧送一帧给子线程推理
+            if frameCount % SKIP_FRAME_INTERVAL == 0:
+                try:
+                    frame_queue.put(frame, block=False)
+                except queue.Full:
+                    pass
+
+            # 非阻塞取推理结果并判定
+            try:
+                faces = result_queue.get(block=False)
+            except queue.Empty:
+                continue
+
+            passed, value, info = self.checkActionWithFaces(faces, frame, action)
+            print(f"  [{action}] {info}  => 值={value:.3f} 通过={passed}", end='\r', flush=True)
+
+            if passed:
+                actionPassed = True
+                print(f"\n  ✓ {action} 通过 (值: {value:.3f})")
+                break
+
+        if not actionPassed:
+            print(f"\n  [超时] {action} 未完成")
+        return actionPassed, False
+
+    def runAdaptiveActions(self, cap):
+        """
+        自适应主动动作检测(第二层防御)
+        =================================
+        随机动作 + 概率递推 + 累计失败计数:
+        - 动作从 ACTION_SEQUENCE 随机打乱,逐个执行
+        - 动作成功: 按连续成功次数查概率表决定是否继续(无失败 45%/15%,有失败 30%/10%)
+        - 动作失败: 100% 继续下一个,累计失败达 MAX_FAIL_COUNT 判定整体失败
+        :param cap: cv2.VideoCapture 摄像头对象
+        :return: (是否通过<bool>, 是否用户中断<bool>)
         """
         import threading
         import queue
 
-        # Step 1: 降低摄像头采集分辨率,缓解画面/鼠标卡顿
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
-        # Step 2: 静默活体检测(第一层)
-        if self.useSilent:
-            if not self.runSilentCheck(cap):
-                cv2.destroyAllWindows()
-                return {"success": False, "step": "静默检测", "msg": "静默活体检测未通过(疑似照片/翻拍)"}
-
-        # Step 3: 正面姿态基准校准
+        # 姿态基准校准(相对偏移判定需要基准)
         if not self.calibrateBaseline(cap):
-            cv2.destroyAllWindows()
-            return {"success": False, "step": "校准", "msg": "用户中断"}
+            return False, True  # 用户中断
 
-        # Step 4: 主动动作检测(双线程架构)
+        # 双线程架构: 主线程显示,子线程推理
         frame_queue = queue.Queue(maxsize=1)
         result_queue = queue.Queue(maxsize=1)
 
@@ -515,58 +570,82 @@ class LivenessDetector:
         worker.start()
 
         try:
-            for action in ACTION_SEQUENCE:
+            # 动作池随机打乱(随机顺序)
+            actionPool = list(ACTION_SEQUENCE)
+            random.shuffle(actionPool)
+            print(f"  [动作池] {actionPool}")
+
+            failCount = 0      # 累计失败次数
+            streak = 0         # 连续成功次数
+            hasFailed = False  # 是否失败过
+
+            while actionPool:
+                action = actionPool.pop(0)
                 clearQueues()
-                print(f"\n请{action}...")
-                actionPassed = False
-                start = time.time()
-                frameCount = 0
 
-                while time.time() - start < ACTION_TIMEOUT:
-                    ret, frame = cap.read()
-                    if not ret:
-                        continue
-                    frameCount += 1
+                passed, interrupted = self._detectSingleAction(cap, action, frame_queue, result_queue)
+                if interrupted:
+                    return False, True
 
-                    # 显示节流: 每 DISPLAY_INTERVAL 帧才显示一次,降低 GUI 压力
-                    if frameCount % DISPLAY_INTERVAL == 0:
-                        display = frame.copy()
-                        remaining = ACTION_TIMEOUT - (time.time() - start)
-                        self._putText(display, f"Action: {action}", (10, 30))
-                        self._putText(display, f"Time: {remaining:.1f}s", (10, 60))
-                        cv2.imshow("Liveness", display)
-                        if cv2.waitKey(1) & 0xFF == 27:
-                            return {"success": False, "step": action, "msg": "用户中断"}
+                if not passed:
+                    # 动作失败: 累计失败 + 重置连续成功
+                    failCount += 1
+                    streak = 0
+                    hasFailed = True
+                    print(f"  [失败] {action} 未完成,累计失败 {failCount}/{MAX_FAIL_COUNT}")
+                    if failCount >= MAX_FAIL_COUNT:
+                        return False, False  # 累计失败达到阈值,整体失败
+                    continue  # 失败 100% 继续下一个动作
 
-                    # 每 SKIP_FRAME_INTERVAL 帧送一帧给子线程推理
-                    if frameCount % SKIP_FRAME_INTERVAL == 0:
-                        try:
-                            frame_queue.put(frame, block=False)
-                        except queue.Full:
-                            pass
+                # 动作成功
+                streak += 1
+                probMap = CONTINUE_PROB_NO_FAIL if not hasFailed else CONTINUE_PROB_HAS_FAIL
+                continueProb = probMap.get(streak, 0.0)
+                if random.random() >= continueProb:
+                    print(f"  [通过] 动作验证通过(连续成功 {streak} 次),无需继续")
+                    break
+                print(f"  [继续] 继续概率 {continueProb * 100:.0f}%,进行下一个动作")
 
-                    # 非阻塞取推理结果并判定
-                    try:
-                        faces = result_queue.get(block=False)
-                    except queue.Empty:
-                        continue
-
-                    passed, value, info = self.checkActionWithFaces(faces, frame, action)
-                    # 打印详细调试数值(绝对姿态/基准/相对偏移/阈值),便于定位动作检测不到的问题
-                    print(f"  [{action}] {info}  => 值={value:.3f} 通过={passed}", end='\r', flush=True)
-
-                    if passed:
-                        actionPassed = True
-                        print(f"\n  ✓ {action} 通过 (值: {value:.3f})")
-                        break
-
-                if not actionPassed:
-                    print(f"\n  [超时] {action} 未完成 | 基准 yaw={self.baselineYaw:.2f} pitch={self.baselinePitch:.2f} EAR={self.baselineEAR}")
-                    return {"success": False, "step": action, "msg": "动作未完成"}
+            # 动作池耗尽或已通过
+            return True, False
         finally:
             stopWorker()
 
-        # Step 5: 动作全部通过后,采集正脸帧(供识别使用)
+    def runLivenessCheck(self, cap, collectFrontal=True):
+        """
+        执行完整活体检测流程(多层防御: 静默 + 自适应动作)
+        ==================================================
+        1. 降低摄像头分辨率(缓解卡顿)
+        2. 静默活体检测(第一层),返回 avgLogitDiff
+        3. 无论静默检测置信度高低,都进行自适应动作检测(第二层)
+        4. (可选)活体通过后采集正脸帧,供识别使用
+
+        :param cap: cv2.VideoCapture 摄像头对象
+        :param collectFrontal: 通过后是否采集正脸帧<bool>,默认 True
+        :return: 结果字典<dict>:
+                 成功: {"success": True, "msg": "...", "frontalFrame": np.ndarray 或 None}
+                 失败: {"success": False, "step": str, "msg": "..."}
+        """
+        # Step 1: 降低摄像头采集分辨率,缓解画面/鼠标卡顿
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        # Step 2: 静默活体检测(第一层),未通过(疑似照片/翻拍)直接拒绝
+        if self.useSilent:
+            silentResult = self.runSilentCheck(cap)
+            if not silentResult["passed"]:
+                cv2.destroyAllWindows()
+                return {"success": False, "step": "静默检测", "msg": "静默活体检测未通过(疑似照片/翻拍)"}
+
+        # Step 3: 无论静默检测置信度高低,都必须进行主动动作检测(第二层)
+        passed, interrupted = self.runAdaptiveActions(cap)
+        cv2.destroyAllWindows()
+        if interrupted:
+            return {"success": False, "step": "动作检测", "msg": "用户中断"}
+        if not passed:
+            return {"success": False, "step": "动作检测", "msg": "动作验证失败"}
+
+        # Step 4: 活体通过后采集正脸帧(供识别使用)
         frontalFrame = None
         if collectFrontal:
             frontalFrame = self._collectFrontalFrame(cap)
