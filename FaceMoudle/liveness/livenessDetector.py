@@ -676,7 +676,7 @@ class LivenessDetector:
         # 动作池耗尽或已通过
         return True, False
 
-    def runLivenessCheck(self, cap, collectFrontal=True):
+    def runLivenessCheck(self, cap, collectFrontal=True, progressCallback=None):
         """
         执行完整活体检测流程(多层防御: 静默 + 自适应动作)
         ==================================================
@@ -687,15 +687,25 @@ class LivenessDetector:
 
         :param cap: cv2.VideoCapture 摄像头对象
         :param collectFrontal: 通过后是否采集正脸帧<bool>,默认 True
+        :param progressCallback: 阶段进度回调<Callable>,签名 progressCallback(stage, detail),
+                                 默认 None(不回调);stage 取值:
+                                 "silent" 静默检测 / "action" 主动动作 / "frontal" 正脸采集
+                                 (回调抛异常会沿调用链向上传播, 由调用方处理, 如取消任务)
         :return: 结果字典<dict>:
                  成功: {"success": True, "msg": "...", "frontalFrame": np.ndarray 或 None}
                  失败: {"success": False, "step": str, "msg": "..."}
         """
+        def _notify(stage, detail=""):
+            """阶段进度回调包装"""
+            if progressCallback is not None:
+                progressCallback(stage, detail)
+
         # Step 1: 降低摄像头采集分辨率,缓解画面/鼠标卡顿
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
         # Step 2: 静默活体检测(第一层),未通过(疑似照片/翻拍)直接拒绝
+        _notify("silent", "静默活体检测中")
         if self.useSilent:
             silentResult = self.runSilentCheck(cap)
             if not silentResult["passed"]:
@@ -703,6 +713,7 @@ class LivenessDetector:
                 return {"success": False, "step": "静默检测", "msg": "静默活体检测未通过(疑似照片/翻拍)"}
 
         # Step 3: 无论静默检测置信度高低,都必须进行主动动作检测(第二层)
+        _notify("action", "主动动作检测中")
         passed, interrupted = self.runAdaptiveActions(cap)
         cv2.destroyAllWindows()
         if interrupted:
@@ -713,6 +724,7 @@ class LivenessDetector:
         # Step 4: 活体通过后采集正脸帧(供识别使用)
         frontalFrame = None
         if collectFrontal:
+            _notify("frontal", "正脸采集中")
             frontalFrame = self._collectFrontalFrame(cap)
 
         cv2.destroyAllWindows()

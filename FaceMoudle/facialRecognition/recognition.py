@@ -353,7 +353,7 @@ def recognizeFaceMulti(registeredNpyPaths, img, threshold=DEFAULT_THRESHOLD):
 # ====================================================================
 # 活体检测 + 人脸识别集成 API
 # ====================================================================
-def runLivenessRecognize(registeredNpyPath, threshold=DEFAULT_THRESHOLD):
+def runLivenessRecognize(registeredNpyPath, threshold=DEFAULT_THRESHOLD, progressCallback=None):
     """
     摄像头活体检测 + 人脸识别一体化流程
     ==================================
@@ -365,6 +365,10 @@ def runLivenessRecognize(registeredNpyPath, threshold=DEFAULT_THRESHOLD):
 
     :param registeredNpyPath: 已注册的 .npy 特征文件路径<str>
     :param threshold: 相似度阈值<float>,默认 0.85
+    :param progressCallback: 阶段进度回调<Callable>,签名 progressCallback(stage, detail),
+                             默认 None(不回调);stage 取值:
+                             "silent" 静默检测 / "action" 主动动作 / "frontal" 正脸采集
+                             / "recognize" 特征比对
     :return: 综合结果字典<dict>,格式:
              {
                  "success": bool,               # 整体成功与否
@@ -382,6 +386,11 @@ def runLivenessRecognize(registeredNpyPath, threshold=DEFAULT_THRESHOLD):
     import sys
     import cv2
     import numpy as np
+
+    def _notify(stage, detail=""):
+        """阶段进度回调包装(回调抛异常会沿调用链向上传播, 由调用方处理)"""
+        if progressCallback is not None:
+            progressCallback(stage, detail)
 
     # 动态导入活体检测模块(FaceMoudle/liveness/livenessDetector.py)
     projectRoot = getProjectRoot()
@@ -404,69 +413,77 @@ def runLivenessRecognize(registeredNpyPath, threshold=DEFAULT_THRESHOLD):
             "recognizeResult": {}
         }
 
-    # Step 3: 执行活体检测(静默 + 主动动作),并采集正脸帧
-    livenessResult = detector.runLivenessCheck(cap, collectFrontal=True)
-    cap.release()
-    cv2.destroyAllWindows()
+    try:
+        # Step 3: 执行活体检测(静默 + 主动动作),并采集正脸帧
+        # 进度回调透传给 runLivenessCheck(内部按阶段回调)
+        livenessResult = detector.runLivenessCheck(
+            cap, collectFrontal=True, progressCallback=progressCallback
+        )
 
-    # 活体未通过 → 直接返回(防照片攻击)
-    if not livenessResult["success"]:
-        return {
-            "success": False,
-            "livenessPass": False,
-            "step": livenessResult.get("step", ""),
-            "msg": livenessResult.get("msg", "活体检测失败"),
-            "recognizeResult": {}
+        # 活体未通过 → 直接返回(防照片攻击)
+        if not livenessResult["success"]:
+            return {
+                "success": False,
+                "livenessPass": False,
+                "step": livenessResult.get("step", ""),
+                "msg": livenessResult.get("msg", "活体检测失败"),
+                "recognizeResult": {}
+            }
+
+        # Step 4: 用正脸帧提取特征(而非动作帧,保证识别准确率)
+        frontalFrame = livenessResult.get("frontalFrame")
+        if frontalFrame is None:
+            return {
+                "success": False,
+                "livenessPass": True,
+                "step": "",
+                "msg": "活体检测通过但未采集到正脸帧",
+                "recognizeResult": {}
+            }
+
+        _notify("recognize", "特征提取与比对中")
+        extractResult = extractCurrentFeature(frontalFrame)
+        if not extractResult["success"]:
+            return {
+                "success": False,
+                "livenessPass": True,
+                "step": "",
+                "msg": f"正脸特征提取失败: {extractResult['msg']}",
+                "recognizeResult": {}
+            }
+
+        currentEmb = extractResult["embedding"]
+
+        # Step 5: 加载注册特征 + 计算相似度 + 阈值判定
+        registeredEmb = loadRegisteredFeature(registeredNpyPath)
+        if registeredEmb is None:
+            return {
+                "success": False,
+                "livenessPass": True,
+                "step": "",
+                "msg": "加载注册特征失败",
+                "recognizeResult": {}
+            }
+
+        similarity = computeSimilarity(registeredEmb, currentEmb)
+        isMatched = similarity >= threshold
+
+        recognizeResult = {
+            "success": True,
+            "matched": isMatched,
+            "similarity": round(similarity, 4),
+            "msg": "识别成功" if isMatched else "相似度低于阈值"
         }
 
-    # Step 4: 用正脸帧提取特征(而非动作帧,保证识别准确率)
-    frontalFrame = livenessResult.get("frontalFrame")
-    if frontalFrame is None:
         return {
-            "success": False,
+            "success": True,
             "livenessPass": True,
             "step": "",
-            "msg": "活体检测通过但未采集到正脸帧",
-            "recognizeResult": {}
+            "msg": "活体检测通过,识别完成",
+            "recognizeResult": recognizeResult
         }
 
-    extractResult = extractCurrentFeature(frontalFrame)
-    if not extractResult["success"]:
-        return {
-            "success": False,
-            "livenessPass": True,
-            "step": "",
-            "msg": f"正脸特征提取失败: {extractResult['msg']}",
-            "recognizeResult": {}
-        }
-
-    currentEmb = extractResult["embedding"]
-
-    # Step 5: 加载注册特征 + 计算相似度 + 阈值判定
-    registeredEmb = loadRegisteredFeature(registeredNpyPath)
-    if registeredEmb is None:
-        return {
-            "success": False,
-            "livenessPass": True,
-            "step": "",
-            "msg": "加载注册特征失败",
-            "recognizeResult": {}
-        }
-
-    similarity = computeSimilarity(registeredEmb, currentEmb)
-    isMatched = similarity >= threshold
-
-    recognizeResult = {
-        "success": True,
-        "matched": isMatched,
-        "similarity": round(similarity, 4),
-        "msg": "识别成功" if isMatched else "相似度低于阈值"
-    }
-
-    return {
-        "success": True,
-        "livenessPass": True,
-        "step": "",
-        "msg": "活体检测通过,识别完成",
-        "recognizeResult": recognizeResult
-    }
+    finally:
+        # 资源释放兜底: 任何路径(含进度回调抛异常/取消)都必须释放摄像头并关闭窗口
+        cap.release()
+        cv2.destroyAllWindows()
