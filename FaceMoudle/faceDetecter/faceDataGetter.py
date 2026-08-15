@@ -22,6 +22,7 @@
 
 # 标准库
 import os        # 路径操作
+import sys       # sys.path 注入(FaceMoudle 目录)
 import json      # JSON 格式保存特征向量
 import time      # 生成时间戳
 import hashlib   # 生成校验码
@@ -31,6 +32,14 @@ import cv2       # 图像解码
 import numpy as np  # 特征向量计算
 from insightface.app import FaceAnalysis  # 人脸检测+识别模型
 from concurrent.futures import ProcessPoolExecutor, as_completed  # 多进程并行
+
+# 限制 ONNX 推理线程数(必须在创建任何 session 前生效)
+# 本文件位于 FaceMoudle/faceDetecter/,上 2 级即 FaceMoudle 目录
+# 注意: ProcessPoolExecutor spawn 子进程重新导入本模块时同样会执行此 patch
+_FACE_MOUDLE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _FACE_MOUDLE_DIR not in sys.path:
+    sys.path.insert(0, _FACE_MOUDLE_DIR)
+import modelConfig  # 导入即自动限制 InsightFace 推理线程数
 
 
 # ====================================================================
@@ -182,7 +191,7 @@ def extractSingleImageFeature(imgPath):
             return {"path": imgPath, "status": "fail", "msg": "无脸"}
 
         # 取第一张人脸的 normed_embedding(InsightFace 内部已 L2 归一化的 512 维向量)
-        # 如果一张图有多张脸,只取最大那张(faces[0] 是按面积排序最大的)
+        # 注意: InsightFace 按检测置信度降序排列(faces[0] 是置信度最高的人脸)
         embedding = faces[0].normed_embedding
 
         # 校验特征维度(正常应为 512 维)
@@ -419,9 +428,13 @@ def cleanOldModelFiles(faceDataDir, userName):
     for file in os.listdir(faceDataDir):
         if file.startswith(prefix) and (file.endswith('.npy') or file.endswith('.json')):
             filePath = os.path.join(faceDataDir, file)
-            os.remove(filePath)
-            deletedCount += 1
-            print(f"[清理] 删除旧模型: {file}")
+            try:
+                os.remove(filePath)
+                deletedCount += 1
+                print(f"[清理] 删除旧模型: {file}")
+            except OSError as e:
+                # 文件被占用/权限不足时跳过,不中断特征生成流程
+                print(f"[清理] 警告: 删除 {file} 失败(可能被占用): {e}")
 
     if deletedCount > 0:
         print(f"共清理 {deletedCount} 个旧模型文件")

@@ -24,11 +24,19 @@
 
 # 标准库
 import os  # 路径操作
+import sys  # sys.path 注入(FaceMoudle 目录)
 
 # 第三方库
 import cv2       # 图像解码
 import numpy as np  # 特征向量计算
 from insightface.app import FaceAnalysis  # 人脸检测+识别模型
+
+# 限制 ONNX 推理线程数(必须在创建任何 session 前生效)
+# 本文件位于 FaceMoudle/facialRecognition/,上 2 级即 FaceMoudle 目录
+_FACE_MOUDLE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _FACE_MOUDLE_DIR not in sys.path:
+    sys.path.insert(0, _FACE_MOUDLE_DIR)
+import modelConfig  # 导入即自动限制 InsightFace 推理线程数
 
 
 # ====================================================================
@@ -174,7 +182,8 @@ def extractCurrentFeature(img):
         if len(faces) == 0:
             return {"success": False, "msg": "未检测到人脸"}
 
-        # 取第一张人脸(面积最大的)的 normed_embedding(已 L2 归一化的 512 维向量)
+        # 取第一张人脸的 normed_embedding(已 L2 归一化的 512 维向量)
+        # 注意: InsightFace 按检测置信度降序排列(faces[0] 是置信度最高的人脸,非面积最大)
         currentEmb = faces[0].normed_embedding
 
         # 校验特征维度

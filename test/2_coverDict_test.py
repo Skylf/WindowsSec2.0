@@ -35,7 +35,9 @@ def makeNoFaceImages(targetDir, count=2):
 
 
 def main():
-    test_dir = os.path.join(projectRoot, "FaceMoudle", "faceInputer", "captured_photos")
+    # 采集图片目录已迁移到项目根 cache/captured_photos(原 FaceMoudle/faceInputer/captured_photos 已废弃)
+    test_dir = os.path.join(projectRoot, "cache", "captured_photos")
+    os.makedirs(test_dir, exist_ok=True)
 
     # === 准备测试数据:插入 2 张无脸图 ===
     print("=" * 60)

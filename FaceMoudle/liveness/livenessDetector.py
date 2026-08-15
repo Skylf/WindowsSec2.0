@@ -18,11 +18,19 @@
 """
 
 import os
+import sys
 import time
 import random
 import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
+
+# 限制 ONNX 推理线程数(必须在创建任何 session 前生效)
+# 本文件位于 FaceMoudle/liveness/,上 2 级即 FaceMoudle 目录
+_FACE_MOUDLE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _FACE_MOUDLE_DIR not in sys.path:
+    sys.path.insert(0, _FACE_MOUDLE_DIR)
+import modelConfig  # 导入即自动限制 InsightFace 推理线程数
 
 # 同包静默活体检测模块(第一层防御),相对导入避免依赖 sys.path
 from .silentLiveness import SilentLivenessDetector
@@ -82,6 +90,16 @@ SKIP_FRAME_INTERVAL = 3
 # 显示节流: 每 N 帧才更新一次 imshow(降低 GUI 压力,缓解鼠标卡顿)
 DISPLAY_INTERVAL = 2
 
+# waitKey 延时(毫秒): 每帧给 Windows 消息泵的处理时间。
+# 1ms 太短,前台焦点窗口的 WM_MOUSEMOVE/WM_PAINT 消息处理不完会堆积 → 鼠标卡顿;
+# 10ms 足够泵完消息,且显示节流下不影响画面流畅度
+WAITKEY_DELAY_MS = 10
+
+# 显示/推理帧最大宽度(像素): 摄像头常返回 1080p/720p 高分辨率,
+# 前台窗口需实际重绘 + 每帧 copy + 推理预处理开销大,统一缩小到 640 宽
+# (人脸检测 det_size=160/识别 det_size=480,640 宽足够,不影响精度)
+DISPLAY_MAX_WIDTH = 640
+
 
 # ====================================================================
 # 路径工具函数
@@ -101,6 +119,23 @@ def getModelRoot():
     :return: 模型根目录的绝对路径<str>
     """
     return os.path.join(getProjectRoot(), 'FaceMoudle', 'moudleTrainner')
+
+
+def shrinkFrame(frame, maxWidth=DISPLAY_MAX_WIDTH):
+    """
+    按宽度等比例缩小摄像头帧(降低前台窗口重绘、帧拷贝与推理预处理开销)
+    摄像头常返回 1080p/720p,而人脸检测 det_size 仅 160,显示也不需要那么大,
+    统一缩到 DISPLAY_MAX_WIDTH 宽,画面更流畅且不影响检测/识别精度
+    :param frame: BGR 图像矩阵<np.ndarray>
+    :param maxWidth: 目标最大宽度<int>,默认 DISPLAY_MAX_WIDTH
+    :return: 缩小后的 BGR 图像矩阵<np.ndarray>
+    """
+    h, w = frame.shape[:2]
+    if w <= maxWidth:
+        return frame
+    scale = maxWidth / float(w)
+    newH = int(h * scale)
+    return cv2.resize(frame, (maxWidth, newH), interpolation=cv2.INTER_AREA)
 
 
 # ====================================================================
@@ -331,6 +366,119 @@ class LivenessDetector:
         """在画面上叠加文字提示"""
         cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
+    def _runDetectLoop(self, cap, inferFunc, onResult, timeout, overlayFunc=None, windowName="Liveness"):
+        """
+        通用"子线程推理 + 主线程显示"循环
+        =================================
+        解决主线程直接做 CPU 密集推理(appDetect.get)阻塞 OpenCV 消息泵(waitKey),
+        导致窗口在前台获得焦点时鼠标卡顿、画面一顿一顿的问题(后台无焦点消息压力则不卡)。
+
+        架构:
+        - 子线程: 从 frame_queue 取帧,执行 inferFunc(frame) 推理,结果放入 result_queue
+        - 主线程: 读帧 -> 节流显示 + waitKey -> 送帧给子线程 -> 取结果 -> onResult 判定
+
+        :param cap: cv2.VideoCapture 摄像头对象
+        :param inferFunc: 子线程推理函数,签名 inferFunc(frame) -> result
+        :param onResult: 主线程结果判定函数,签名 onResult(result, frame, state) -> bool
+                         返回 True 表示流程完成(跳出循环);state 用于记录累计数据
+        :param timeout: 超时时间<秒>
+        :param overlayFunc: 主线程叠加文字函数,签名 overlayFunc(display, state),默认 None
+        :param windowName: OpenCV 窗口名<str>,默认 "Liveness"(录入流程用 "Capture")
+        :return: state<dict>,含 "interrupted"(是否 ESC 中断)及 onResult 写入的自定义数据
+        """
+        import threading
+        import queue
+
+        frame_queue = queue.Queue(maxsize=1)   # 待推理帧队列(只保留最新 1 帧)
+        result_queue = queue.Queue(maxsize=1)  # 推理结果队列(只保留最新 1 个结果)
+        state = {"interrupted": False, "_start": time.time()}
+
+        def worker():
+            """子线程: 循环取帧推理,收到 None 哨兵退出"""
+            while True:
+                try:
+                    frame = frame_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if frame is None:
+                    break
+                result = inferFunc(frame)
+                # 结果队列满时丢弃旧结果,保证主线程拿到的是最新帧的推理结果
+                try:
+                    result_queue.put_nowait(result)
+                except queue.Full:
+                    try:
+                        result_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        result_queue.put_nowait(result)
+                    except queue.Full:
+                        pass
+
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        worker_thread.start()
+
+        frameCount = 0
+        finished = False
+        try:
+            while not finished and (time.time() - state["_start"]) < timeout:
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                # 缩小高分辨率摄像头帧,降低前台重绘/拷贝/推理预处理开销
+                frame = shrinkFrame(frame)
+                frameCount += 1
+
+                # 显示节流: 每 DISPLAY_INTERVAL 帧才显示一次,降低 HighGUI 消息泵压力
+                if frameCount % DISPLAY_INTERVAL == 0:
+                    display = frame.copy()
+                    if overlayFunc is not None:
+                        overlayFunc(display, state)
+                    cv2.imshow(windowName, display)
+                    if cv2.waitKey(WAITKEY_DELAY_MS) & 0xFF == 27:
+                        state["interrupted"] = True
+                        finished = True
+                        break
+                else:
+                    # 非显示帧也要泵 Windows 消息(waitKey 内部处理消息泵),
+                    # 否则前台焦点窗口的鼠标/重绘消息堆积 → 鼠标卡顿
+                    if cv2.waitKey(WAITKEY_DELAY_MS) & 0xFF == 27:
+                        state["interrupted"] = True
+                        finished = True
+                        break
+
+                # 跳帧: 每 SKIP_FRAME_INTERVAL 帧送一帧给子线程推理
+                if frameCount % SKIP_FRAME_INTERVAL == 0:
+                    try:
+                        frame_queue.put(frame, block=False)
+                    except queue.Full:
+                        pass
+
+                # 非阻塞取推理结果并判定(判定在主线程,速度快,不阻塞消息泵)
+                try:
+                    result = result_queue.get(block=False)
+                except queue.Empty:
+                    continue
+
+                if onResult(result, frame, state):
+                    finished = True
+                    break
+        finally:
+            # 终止子线程: 清空待处理帧后放入 None 哨兵
+            try:
+                while True:
+                    frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                frame_queue.put(None, block=False)
+            except queue.Full:
+                pass
+            worker_thread.join(timeout=1.0)
+
+        return state
+
     def calibrateBaseline(self, cap):
         """
         采集正面姿态基准(用于动作的相对偏移判定)
@@ -341,29 +489,15 @@ class LivenessDetector:
         """
         print("\n[校准] 请正对摄像头,保持不动(采集正面基准)...")
         yaws, pitches, ears = [], [], []
-        start = time.time()
-        frameCount = 0
 
-        while time.time() - start < BASELINE_DURATION:
-            ret, frame = cap.read()
-            if not ret:
-                continue
-            frameCount += 1
+        def infer(frame):
+            """子线程推理: 检测人脸"""
+            return self.appDetect.get(frame)
 
-            display = frame.copy()
-            self._putText(display, "Calibrating frontal baseline...", (10, 30))
-            cv2.imshow("Liveness", display)
-            if cv2.waitKey(1) & 0xFF == 27:
-                return False
-
-            # 跳帧降低 CPU 负担
-            if frameCount % SKIP_FRAME_INTERVAL != 0:
-                continue
-
-            faces = self.appDetect.get(frame)
+        def onResult(faces, frame, state):
+            """主线程处理: 收集正面姿态/眼睛灰度基准"""
             if len(faces) == 0:
-                continue
-
+                return False
             pitch, yaw, roll = self._getPose(faces[0])
             yaws.append(yaw)
             pitches.append(pitch)
@@ -374,6 +508,14 @@ class LivenessDetector:
             # 实时打印采集到的姿态和眼睛灰度,便于观察基准是否合理
             print(f"  [校准] yaw={yaw:.2f} pitch={pitch:.2f} roll={roll:.2f} eyeStd={eye_disp:.2f}",
                   end='\r', flush=True)
+            return False  # 一直采集到超时
+
+        def overlay(display, state):
+            self._putText(display, "Calibrating frontal baseline...", (10, 30))
+
+        state = self._runDetectLoop(cap, infer, onResult, BASELINE_DURATION, overlayFunc=overlay)
+        if state.get("interrupted"):
+            return False  # 用户 ESC 中断
 
         if len(yaws) < 3 or len(ears) < 3:
             print("\n  [警告] 基准采集样本不足,使用默认基准")
@@ -400,33 +542,21 @@ class LivenessDetector:
         """
         print("\n[静默活体检测] 请正对摄像头,勿做动作(拦截照片/翻拍)...")
         passCount = 0
-        frameCount = 0
-        start = time.time()
         logitDiffs = []  # 通过帧的 logitDiff(real - spoof)
-        # 静默阶段最长 8 秒
-        while passCount < SILENT_PASS_FRAMES and time.time() - start < 8.0:
-            ret, frame = cap.read()
-            if not ret:
-                continue
-            frameCount += 1
 
-            display = frame.copy()
-            self._putText(display, f"Silent check: {passCount}/{SILENT_PASS_FRAMES}", (10, 30))
-            cv2.imshow("Liveness", display)
-            if cv2.waitKey(1) & 0xFF == 27:
-                return {"passed": False, "avgLogitDiff": 0.0}
-
-            # 跳帧降低 CPU 负担
-            if frameCount % SKIP_FRAME_INTERVAL != 0:
-                continue
-
+        def infer(frame):
+            """子线程推理: 人脸检测 + 静默判定(两者均 CPU 密集)"""
             faces = self.appDetect.get(frame)
             if len(faces) == 0:
-                continue
-
-            # 取第一个人脸的 bbox 做静默判定
+                return None
             bbox = faces[0].bbox
-            result = self.silentDetector.check(frame, bbox)
+            return self.silentDetector.check(frame, bbox)
+
+        def onResult(result, frame, state):
+            """主线程处理: 统计连续通过帧数"""
+            nonlocal passCount, logitDiffs
+            if result is None:
+                return False
             if result["isReal"]:
                 passCount += 1
                 logitDiffs.append(result["detail"].get("logitDiff", 0.0))
@@ -434,6 +564,15 @@ class LivenessDetector:
                 passCount = 0  # 任一帧疑似假体则重新计数
                 logitDiffs = []
                 print(f"  [静默异常] {result['detail']}")
+            return passCount >= SILENT_PASS_FRAMES
+
+        def overlay(display, state):
+            self._putText(display, f"Silent check: {passCount}/{SILENT_PASS_FRAMES}", (10, 30))
+
+        # 静默阶段最长 8 秒
+        state = self._runDetectLoop(cap, infer, onResult, 8.0, overlayFunc=overlay)
+        if state.get("interrupted"):
+            return {"passed": False, "avgLogitDiff": 0.0}
 
         if passCount >= SILENT_PASS_FRAMES:
             avgLogitDiff = float(np.mean(logitDiffs)) if logitDiffs else 0.0
@@ -443,59 +582,43 @@ class LivenessDetector:
             print(f"  ✗ 静默活体检测未通过({passCount}/{SILENT_PASS_FRAMES})")
             return {"passed": False, "avgLogitDiff": 0.0}
 
-    def _detectSingleAction(self, cap, action, frame_queue, result_queue):
+    def _detectSingleAction(self, cap, action):
         """
-        检测单个动作(双线程架构,供自适应动作检测复用)
+        检测单个动作(复用通用 _runDetectLoop 的子线程推理 + 主线程显示架构)
         :param cap: cv2.VideoCapture 摄像头对象
         :param action: 动作名称<str>
-        :param frame_queue: 帧队列<queue.Queue>
-        :param result_queue: 结果队列<queue.Queue>
         :return: (是否通过<bool>, 是否用户中断<bool>)
         """
-        import queue
-
         print(f"\n请{action}...")
-        actionPassed = False
-        start = time.time()
-        frameCount = 0
 
-        while time.time() - start < ACTION_TIMEOUT:
-            ret, frame = cap.read()
-            if not ret:
-                continue
-            frameCount += 1
+        def infer(frame):
+            """子线程推理: 检测人脸"""
+            return self.appDetect.get(frame)
 
-            # 显示节流: 每 DISPLAY_INTERVAL 帧才显示一次,降低 GUI 压力
-            if frameCount % DISPLAY_INTERVAL == 0:
-                display = frame.copy()
-                remaining = ACTION_TIMEOUT - (time.time() - start)
-                self._putText(display, f"Action: {action}", (10, 30))
-                self._putText(display, f"Time: {remaining:.1f}s", (10, 60))
-                cv2.imshow("Liveness", display)
-                if cv2.waitKey(1) & 0xFF == 27:
-                    return False, True
-
-            # 每 SKIP_FRAME_INTERVAL 帧送一帧给子线程推理
-            if frameCount % SKIP_FRAME_INTERVAL == 0:
-                try:
-                    frame_queue.put(frame, block=False)
-                except queue.Full:
-                    pass
-
-            # 非阻塞取推理结果并判定
-            try:
-                faces = result_queue.get(block=False)
-            except queue.Empty:
-                continue
-
+        def onResult(faces, frame, state):
+            """主线程处理: 用已检测到的人脸判定动作(数值计算快,不阻塞消息泵)"""
             passed, value, info = self.checkActionWithFaces(faces, frame, action)
-            print(f"  [{action}] {info}  => 值={value:.3f} 通过={passed}", end='\r', flush=True)
-
+            # 打印节流: 每 5 帧才刷新一次控制台,避免 PyCharm/终端渲染高频输出拖慢系统
+            frameCount = state.setdefault("printCount", 0) + 1
+            state["printCount"] = frameCount
+            if frameCount % 5 == 0:
+                print(f"  [{action}] {info}  => 值={value:.3f} 通过={passed}", end='\r', flush=True)
             if passed:
-                actionPassed = True
+                state["passed"] = True
                 print(f"\n  ✓ {action} 通过 (值: {value:.3f})")
-                break
+                return True
+            return False
 
+        def overlay(display, state):
+            remaining = ACTION_TIMEOUT - (time.time() - state["_start"])
+            self._putText(display, f"Action: {action}", (10, 30))
+            self._putText(display, f"Time: {remaining:.1f}s", (10, 60))
+
+        state = self._runDetectLoop(cap, infer, onResult, ACTION_TIMEOUT, overlayFunc=overlay)
+        if state.get("interrupted"):
+            return False, True
+
+        actionPassed = state.get("passed", False)
         if not actionPassed:
             print(f"\n  [超时] {action} 未完成")
         return actionPassed, False
@@ -508,108 +631,50 @@ class LivenessDetector:
         - 动作从 ACTION_SEQUENCE 随机打乱,逐个执行
         - 动作成功: 按连续成功次数查概率表决定是否继续(无失败 45%/15%,有失败 30%/10%)
         - 动作失败: 100% 继续下一个,累计失败达 MAX_FAIL_COUNT 判定整体失败
+        每个动作内部由 _runDetectLoop 统一管理"子线程推理 + 主线程显示"。
         :param cap: cv2.VideoCapture 摄像头对象
         :return: (是否通过<bool>, 是否用户中断<bool>)
         """
-        import threading
-        import queue
-
         # 姿态基准校准(相对偏移判定需要基准)
         if not self.calibrateBaseline(cap):
             return False, True  # 用户中断
 
-        # 双线程架构: 主线程显示,子线程推理
-        frame_queue = queue.Queue(maxsize=1)
-        result_queue = queue.Queue(maxsize=1)
+        # 动作池随机打乱(随机顺序)
+        actionPool = list(ACTION_SEQUENCE)
+        random.shuffle(actionPool)
+        print(f"  [动作池] {actionPool}")
 
-        def inferenceWorker():
-            """子线程: 从帧队列取帧执行轻量模型推理"""
-            while True:
-                try:
-                    frame = frame_queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                if frame is None:
-                    break
-                faces = self.appDetect.get(frame)
-                try:
-                    result_queue.put(faces, block=False)
-                except queue.Full:
-                    try:
-                        result_queue.get(block=False)
-                    except queue.Empty:
-                        pass
-                    try:
-                        result_queue.put(faces, block=False)
-                    except queue.Full:
-                        pass
+        failCount = 0      # 累计失败次数
+        streak = 0         # 连续成功次数
+        hasFailed = False  # 是否失败过
 
-        def clearQueues():
-            """清空帧/结果队列残留"""
-            for q in (frame_queue, result_queue):
-                while True:
-                    try:
-                        q.get(block=False)
-                    except queue.Empty:
-                        break
+        while actionPool:
+            action = actionPool.pop(0)
+            passed, interrupted = self._detectSingleAction(cap, action)
+            if interrupted:
+                return False, True
 
-        def stopWorker():
-            """终止子线程"""
-            while True:
-                try:
-                    frame_queue.get(block=False)
-                except queue.Empty:
-                    break
-            try:
-                frame_queue.put(None, block=False)
-            except queue.Full:
-                pass
-            worker.join(timeout=1.0)
+            if not passed:
+                # 动作失败: 累计失败 + 重置连续成功
+                failCount += 1
+                streak = 0
+                hasFailed = True
+                print(f"  [失败] {action} 未完成,累计失败 {failCount}/{MAX_FAIL_COUNT}")
+                if failCount >= MAX_FAIL_COUNT:
+                    return False, False  # 累计失败达到阈值,整体失败
+                continue  # 失败 100% 继续下一个动作
 
-        worker = threading.Thread(target=inferenceWorker, daemon=True)
-        worker.start()
+            # 动作成功
+            streak += 1
+            probMap = CONTINUE_PROB_NO_FAIL if not hasFailed else CONTINUE_PROB_HAS_FAIL
+            continueProb = probMap.get(streak, 0.0)
+            if random.random() >= continueProb:
+                print(f"  [通过] 动作验证通过(连续成功 {streak} 次),无需继续")
+                break
+            print(f"  [继续] 继续概率 {continueProb * 100:.0f}%,进行下一个动作")
 
-        try:
-            # 动作池随机打乱(随机顺序)
-            actionPool = list(ACTION_SEQUENCE)
-            random.shuffle(actionPool)
-            print(f"  [动作池] {actionPool}")
-
-            failCount = 0      # 累计失败次数
-            streak = 0         # 连续成功次数
-            hasFailed = False  # 是否失败过
-
-            while actionPool:
-                action = actionPool.pop(0)
-                clearQueues()
-
-                passed, interrupted = self._detectSingleAction(cap, action, frame_queue, result_queue)
-                if interrupted:
-                    return False, True
-
-                if not passed:
-                    # 动作失败: 累计失败 + 重置连续成功
-                    failCount += 1
-                    streak = 0
-                    hasFailed = True
-                    print(f"  [失败] {action} 未完成,累计失败 {failCount}/{MAX_FAIL_COUNT}")
-                    if failCount >= MAX_FAIL_COUNT:
-                        return False, False  # 累计失败达到阈值,整体失败
-                    continue  # 失败 100% 继续下一个动作
-
-                # 动作成功
-                streak += 1
-                probMap = CONTINUE_PROB_NO_FAIL if not hasFailed else CONTINUE_PROB_HAS_FAIL
-                continueProb = probMap.get(streak, 0.0)
-                if random.random() >= continueProb:
-                    print(f"  [通过] 动作验证通过(连续成功 {streak} 次),无需继续")
-                    break
-                print(f"  [继续] 继续概率 {continueProb * 100:.0f}%,进行下一个动作")
-
-            # 动作池耗尽或已通过
-            return True, False
-        finally:
-            stopWorker()
+        # 动作池耗尽或已通过
+        return True, False
 
     def runLivenessCheck(self, cap, collectFrontal=True):
         """
@@ -662,36 +727,33 @@ class LivenessDetector:
         :return: 正脸 BGR 帧<np.ndarray>,超时返回 None
         """
         print("\n[正脸采集] 请正对摄像头,用于身份识别...")
-        start = time.time()
-        frameCount = 0
-        while time.time() - start < timeout:
-            ret, frame = cap.read()
-            if not ret:
-                continue
-            frameCount += 1
 
-            display = frame.copy()
-            self._putText(display, "Keep frontal for recognition...", (10, 30))
-            cv2.imshow("Liveness", display)
-            if cv2.waitKey(1) & 0xFF == 27:
-                return None
+        def infer(frame):
+            """子线程推理: 检测人脸"""
+            return self.appDetect.get(frame)
 
-            if frameCount % SKIP_FRAME_INTERVAL != 0:
-                continue
-
-            faces = self.appDetect.get(frame)
+        def onResult(faces, frame, state):
+            """主线程处理: 判定是否为正脸(姿态摆正),是则记录该帧"""
             if len(faces) == 0:
-                continue
+                return False
             lm = faces[0].landmark_2d_106
             if lm is None:
-                continue
-
+                return False
             pitch, yaw, roll = self._getPose(faces[0])
             relYaw = yaw - self.baselineYaw
             relPitch = pitch - self.baselinePitch
             if abs(relYaw) <= FRONTAL_YAW_TOL and abs(relPitch) <= FRONTAL_PITCH_TOL:
+                state["frontalFrame"] = frame
                 print("  ✓ 已采集正脸帧")
-                return frame
+                return True
+            return False
+
+        def overlay(display, state):
+            self._putText(display, "Keep frontal for recognition...", (10, 30))
+
+        state = self._runDetectLoop(cap, infer, onResult, timeout, overlayFunc=overlay)
+        if state.get("frontalFrame") is not None:
+            return state["frontalFrame"]
 
         print("  [警告] 正脸采集超时,返回 None")
         return None

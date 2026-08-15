@@ -15,6 +15,7 @@ imgInputter/openCamera函数采集图像，放入cache/captured_photos下，face
 
 # 标准库
 import os
+import sys  # sys.path 注入(FaceMoudle 目录)
 
 # 第三方库
 import cv2
@@ -22,6 +23,14 @@ import numpy as np
 from tkinter import filedialog, Tk
 from insightface.app import FaceAnalysis
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# 限制 ONNX 推理线程数(必须在创建任何 session 前生效)
+# 本文件位于 FaceMoudle/faceInputer/,上 2 级即 FaceMoudle 目录
+# 注意: ProcessPoolExecutor spawn 子进程重新导入本模块时同样会执行此 patch
+_FACE_MOUDLE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _FACE_MOUDLE_DIR not in sys.path:
+    sys.path.insert(0, _FACE_MOUDLE_DIR)
+import modelConfig  # 导入即自动限制 InsightFace 推理线程数
 
 
 # ====================================================================
@@ -242,14 +251,19 @@ def openCamera():
                 pass
 
     # 初始化活体检测器(加载轻量模型 det + landmark_2d_106,约 1-2 秒)
+    # 引导式采集只用姿态/表情判定,不需要静默活体检测器(useSilent=False 省一次模型加载)
     print("正在初始化检测器(加载模型)...")
-    detector = LivenessDetector()
+    detector = LivenessDetector(useSilent=False)
 
     # 打开摄像头
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
         print("摄像头无法打开")
         return None
+
+    # 降低采集分辨率(与活体流程一致,减少 USB 带宽/解码开销;部分摄像头不生效由 shrinkFrame 兜底)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     print("\n" + "=" * 60)
     print("  开始引导式采集:正面 10 张 + 5 动作各 4 张 = 30 张")
@@ -272,31 +286,35 @@ def openCamera():
             for attempt in range(3):
                 print(f"\n[前置] 请保持正脸,不要眨眼(采集基准 EAR, 第 {attempt + 1} 次)...")
                 ears = []
-                baselineStart = time.time()
-                baselineFrameCount = 0  # 跳帧计数器:每 3 帧检测一次,降低 CPU 负担
                 curDuration = BASELINE_DURATION + attempt  # 第 2/3 次延长采集时间
-                while time.time() - baselineStart < curDuration:
-                    ret, frame = cap.read()
-                    if not ret:
-                        continue
-                    cv2.imshow("Capture", frame)
-                    if cv2.waitKey(1) & 0xFF == 27:
-                        print("\n用户 ESC 退出")
-                        cap.release()
-                        cv2.destroyAllWindows()
-                        return None
 
-                    baselineFrameCount += 1
-                    # 跳帧:每 3 帧检测一次,降低 CPU 推理负担
-                    if baselineFrameCount % 3 != 0:
-                        continue
+                def infer(frame):
+                    """子线程推理: 检测人脸(复用活体检测器轻量模型)"""
+                    return detector.appDetect.get(frame)
 
-                    faces = detector.appDetect.get(frame)
+                def onResult(faces, frame, state):
+                    """主线程处理: 收集 EAR 样本(数值计算快,不阻塞消息泵)"""
                     if len(faces) > 0 and faces[0].landmark_2d_106 is not None:
                         lm = faces[0].landmark_2d_106
                         le = detector.computeEAR(lm, LEFT_EYE_INDICES)
                         re = detector.computeEAR(lm, RIGHT_EYE_INDICES)
                         ears.append((le + re) / 2.0)
+                    return False  # 一直采集到超时
+
+                def overlay(display, state):
+                    """画面提示: 采集基准中"""
+                    cv2.putText(display, "Collecting baseline EAR...", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                # 复用 _runDetectLoop 双线程架构(推理在子线程,主线程只显示/收集,不再卡顿)
+                baselineState = detector._runDetectLoop(
+                    cap, infer, onResult, curDuration, overlayFunc=overlay, windowName="Capture"
+                )
+                if baselineState.get("interrupted"):
+                    print("\n用户 ESC 退出")
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    return None
                 if ears:
                     baselineEAR = float(np.mean(ears))
                     break
@@ -311,60 +329,26 @@ def openCamera():
         print(f"\n[{stageName}] {stagePrompt}  (目标 {stageTarget} 张, 阶段超时 {STAGE_TIMEOUT}s)")
 
         stageShotCount = 0            # 该阶段已拍张数
-        stageFrameCount = 0           # 跳帧计数器:每 3 帧检测一次,降低 CPU 负担
         lastShotTime = 0.0            # 上次拍时间(用于连拍间隔)
-        stageStartTime = time.time()  # 阶段开始时间
         userEscaped = False
 
-        while stageShotCount < stageTarget:
-            # 阶段超时保护:超时就强行进入下一阶段
-            if time.time() - stageStartTime > STAGE_TIMEOUT:
-                print(f"  [超时] {stageName} 只拍了 {stageShotCount}/{stageTarget} 张,进入下一阶段")
-                break
+        def infer(frame):
+            """子线程推理: 检测人脸(复用活体检测器轻量模型)"""
+            return detector.appDetect.get(frame)
 
-            ret, frame = cap.read()
-            if not ret:
-                continue
-
-            # ── 画面上叠加提示信息 ──
-            display = frame.copy()
-            elapsed = time.time() - stageStartTime
-            remainTime = max(0.0, STAGE_TIMEOUT - elapsed)
-            progress = stageShotCount / stageTarget
-            cv2.putText(display,
-                        f"{stageName}: {stagePrompt}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(display,
-                        f"Progress: {stageShotCount}/{stageTarget}  Time: {remainTime:.1f}s",
-                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            # 进度条
-            barW = 400
-            barX0, barY0 = 10, 80
-            cv2.rectangle(display, (barX0, barY0), (barX0 + barW, barY0 + 10), (200, 200, 200), -1)
-            cv2.rectangle(display, (barX0, barY0), (barX0 + int(barW * progress), barY0 + 10), (0, 255, 0), -1)
-
-            cv2.imshow("Capture", display)
-            if cv2.waitKey(1) & 0xFF == 27:
-                userEscaped = True
-                break
-
-            # ── 跳帧逻辑:每 3 帧检测一次,降低 CPU 推理负担 ──
-            stageFrameCount += 1
-            if stageFrameCount % 3 != 0:
-                continue  # 本帧只显示不检测,继续下一帧
+        def onResult(faces, frame, state):
+            """主线程处理: 条件判定 + 连拍保存(数值计算快,不阻塞消息泵)"""
+            nonlocal stageShotCount, lastShotTime, global_photo_count
+            if len(faces) == 0:
+                return False
+            face = faces[0]
+            landmarks = face.landmark_2d_106
+            if landmarks is None:
+                return False
 
             # ── 条件判定:是否满足该阶段的拍照条件 ──
             conditionPass = False
             curValue = 0.0
-
-            # 先用轻量模型检测(只跑 det + landmark_2d_106,不跑识别模型)
-            faces = detector.appDetect.get(frame)
-            if len(faces) == 0:
-                continue  # 无人脸 → 跳过该帧
-            face = faces[0]
-            landmarks = face.landmark_2d_106
-            if landmarks is None:
-                continue
 
             if stageName == "正面":
                 # 条件:Yaw 与 Pitch 接近 0°(姿态摆正)
@@ -416,6 +400,35 @@ def openCamera():
                     lastShotTime = time.time()
                     print(f"  [{stageName}] 已拍 {stageShotCount}/{stageTarget} "
                           f"(共 {global_photo_count}/{TARGET_CAPTURE_COUNT})  val={curValue:.3f}  → {os.path.basename(filename)}")
+            return stageShotCount >= stageTarget  # 拍够本阶段张数即结束
+
+        def overlay(display, state):
+            """画面提示: 阶段名 + 进度 + 剩余时间 + 进度条"""
+            elapsed = time.time() - state["_start"]
+            remainTime = max(0.0, STAGE_TIMEOUT - elapsed)
+            progress = stageShotCount / stageTarget
+            cv2.putText(display,
+                        f"{stageName}: {stagePrompt}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(display,
+                        f"Progress: {stageShotCount}/{stageTarget}  Time: {remainTime:.1f}s",
+                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # 进度条
+            barW = 400
+            barX0, barY0 = 10, 80
+            cv2.rectangle(display, (barX0, barY0), (barX0 + barW, barY0 + 10), (200, 200, 200), -1)
+            cv2.rectangle(display, (barX0, barY0), (barX0 + int(barW * progress), barY0 + 10), (0, 255, 0), -1)
+
+        # 复用 _runDetectLoop 双线程架构(推理在子线程,主线程只显示/判定/保存,不再卡顿)
+        stageState = detector._runDetectLoop(
+            cap, infer, onResult, STAGE_TIMEOUT, overlayFunc=overlay, windowName="Capture"
+        )
+        if stageState.get("interrupted"):
+            userEscaped = True
+
+        # 阶段超时保护:超时就强行进入下一阶段
+        if stageShotCount < stageTarget:
+            print(f"  [超时] {stageName} 只拍了 {stageShotCount}/{stageTarget} 张,进入下一阶段")
 
         if userEscaped:
             print("\n用户 ESC 退出")
@@ -676,36 +689,19 @@ def collectFrontalPhotos(cap, detector, count=TARGET_CAPTURE_COUNT, timeout=20.0
     print(f"\n开始采集正脸照片(目标 {count} 张,请正对摄像头保持不动)...")
     shot_count = 0
     last_shot = 0.0
-    start = time.time()
-    frame_count = 0
 
-    while shot_count < count and time.time() - start < timeout:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        frame_count += 1
+    def infer(frame):
+        """子线程推理: 检测人脸(复用活体检测器轻量模型)"""
+        return detector.appDetect.get(frame)
 
-        # 显示节流
-        if frame_count % 2 == 0:
-            display = frame.copy()
-            cv2.putText(display, f"Frontal: {shot_count}/{count}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(display, f"Time: {max(0, timeout - (time.time() - start)):.1f}s", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.imshow("Liveness", display)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
-
-        # 跳帧降低 CPU 负担
-        if frame_count % 3 != 0:
-            continue
-
-        faces = detector.appDetect.get(frame)
+    def onResult(faces, frame, state):
+        """主线程处理: 正脸判定 + 连拍保存(数值计算快,不阻塞消息泵)"""
+        nonlocal shot_count, last_shot
         if len(faces) == 0:
-            continue
+            return False
         face = faces[0]
         if face.landmark_2d_106 is None:
-            continue
+            return False
 
         pitch, yaw, roll = detector._getPose(face)
         # 正脸判定: yaw/pitch 接近 0(姿态摆正)
@@ -718,6 +714,21 @@ def collectFrontalPhotos(cap, detector, count=TARGET_CAPTURE_COUNT, timeout=20.0
                     shot_count += 1
                     last_shot = time.time()
                     print(f"  已拍 {shot_count}/{count}")
+        return shot_count >= count  # 拍够目标张数即结束
+
+    def overlay(display, state):
+        """画面提示: 进度 + 剩余时间"""
+        cv2.putText(display, f"Frontal: {shot_count}/{count}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(display, f"Time: {max(0, timeout - (time.time() - state['_start'])):.1f}s", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+    # 复用 _runDetectLoop 双线程架构(推理在子线程,主线程只显示/判定/保存,不再卡顿)
+    collectState = detector._runDetectLoop(
+        cap, infer, onResult, timeout, overlayFunc=overlay, windowName="Liveness"
+    )
+    if collectState.get("interrupted"):
+        print("用户 ESC 中断采集")
 
     print(f"正脸采集完成: {shot_count}/{count} 张,目录: {save_dir}")
     return save_dir

@@ -16,9 +16,16 @@
 """
 
 import os
+import sys
 import cv2
 import numpy as np
-import onnxruntime as ort
+
+# 限制 ONNX 推理线程数(必须在创建任何 session 前生效)
+# 本文件位于 FaceMoudle/liveness/,上 2 级即 FaceMoudle 目录
+_FACE_MOUDLE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _FACE_MOUDLE_DIR not in sys.path:
+    sys.path.insert(0, _FACE_MOUDLE_DIR)
+import modelConfig  # 导入即自动限制 InsightFace 推理线程数
 
 
 # ====================================================================
@@ -64,8 +71,8 @@ class SilentLivenessDetector:
         if not os.path.exists(modelPath):
             raise FileNotFoundError(f"MiniFASNet 模型不存在: {modelPath}")
 
-        # 加载 onnx 模型(CPU 推理)
-        self.session = ort.InferenceSession(modelPath, providers=['CPUExecutionProvider'])
+        # 加载 onnx 模型(CPU 推理,线程数受限避免全核抢占 CPU 导致系统卡顿)
+        self.session = modelConfig.createSession(modelPath)
         self.inputName = self.session.get_inputs()[0].name
         self.modelReady = True
 
