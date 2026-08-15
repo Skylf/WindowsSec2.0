@@ -366,7 +366,9 @@ class LivenessDetector:
         """在画面上叠加文字提示"""
         cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-    def _runDetectLoop(self, cap, inferFunc, onResult, timeout, overlayFunc=None, windowName="Liveness"):
+    def _runDetectLoop(self, cap, inferFunc, onResult, timeout, overlayFunc=None,
+                       windowName="Liveness", frameCallback=None, prompt="",
+                       showWindow=True):
         """
         通用"子线程推理 + 主线程显示"循环
         =================================
@@ -384,6 +386,11 @@ class LivenessDetector:
         :param timeout: 超时时间<秒>
         :param overlayFunc: 主线程叠加文字函数,签名 overlayFunc(display, state),默认 None
         :param windowName: OpenCV 窗口名<str>,默认 "Liveness"(录入流程用 "Capture")
+        :param frameCallback: 帧回调函数,签名 frameCallback(frame, prompt),
+                              每帧调用(供外部 UI 内嵌显示摄像头画面),默认 None
+        :param prompt: 当前阶段提示词<str>(如 "请左转"),随帧回调传给外部显示
+        :param showWindow: 是否显示 OpenCV 窗口<bool>,默认 True;
+                           传入 frameCallback(UI 内嵌显示)时通常传 False,不再弹 OpenCV 窗口
         :return: state<dict>,含 "interrupted"(是否 ESC 中断)及 onResult 写入的自定义数据
         """
         import threading
@@ -430,8 +437,12 @@ class LivenessDetector:
                 frame = shrinkFrame(frame)
                 frameCount += 1
 
+                # 帧回调: 每帧交给外部(如 UI 内嵌摄像头画面), 附带当前提示词
+                if frameCallback is not None:
+                    frameCallback(frame, prompt)
+
                 # 显示节流: 每 DISPLAY_INTERVAL 帧才显示一次,降低 HighGUI 消息泵压力
-                if frameCount % DISPLAY_INTERVAL == 0:
+                if showWindow and frameCount % DISPLAY_INTERVAL == 0:
                     display = frame.copy()
                     if overlayFunc is not None:
                         overlayFunc(display, state)
@@ -440,7 +451,7 @@ class LivenessDetector:
                         state["interrupted"] = True
                         finished = True
                         break
-                else:
+                elif showWindow:
                     # 非显示帧也要泵 Windows 消息(waitKey 内部处理消息泵),
                     # 否则前台焦点窗口的鼠标/重绘消息堆积 → 鼠标卡顿
                     if cv2.waitKey(WAITKEY_DELAY_MS) & 0xFF == 27:
@@ -479,12 +490,13 @@ class LivenessDetector:
 
         return state
 
-    def calibrateBaseline(self, cap):
+    def calibrateBaseline(self, cap, frameCallback=None):
         """
         采集正面姿态基准(用于动作的相对偏移判定)
         提示用户正对摄像头,采集 BASELINE_DURATION 秒内的 Yaw/Pitch/EAR 均值,
         消除 solvePnP 系统偏差
         :param cap: cv2.VideoCapture 摄像头对象
+        :param frameCallback: 帧回调(供 UI 内嵌显示), 签名 frameCallback(frame, prompt)
         :return: 是否校准成功<bool>
         """
         print("\n[校准] 请正对摄像头,保持不动(采集正面基准)...")
@@ -513,7 +525,11 @@ class LivenessDetector:
         def overlay(display, state):
             self._putText(display, "Calibrating frontal baseline...", (10, 30))
 
-        state = self._runDetectLoop(cap, infer, onResult, BASELINE_DURATION, overlayFunc=overlay)
+        state = self._runDetectLoop(
+            cap, infer, onResult, BASELINE_DURATION, overlayFunc=overlay,
+            frameCallback=frameCallback, prompt="请不要动",
+            showWindow=(frameCallback is None)
+        )
         if state.get("interrupted"):
             return False  # 用户 ESC 中断
 
@@ -531,11 +547,12 @@ class LivenessDetector:
         print(f"\n  基准: Yaw={self.baselineYaw:.2f}, Pitch={self.baselinePitch:.2f}, eyeStd={self.baselineEAR:.2f} (样本 {len(yaws)} 帧)")
         return True
 
-    def runSilentCheck(self, cap):
+    def runSilentCheck(self, cap, frameCallback=None):
         """
         静默活体检测阶段(第一层防御)
         连续采集多帧,每帧做人脸检测 + 静默判定,全部通过才判定为真人(非攻击)
         :param cap: cv2.VideoCapture 摄像头对象
+        :param frameCallback: 帧回调(供 UI 内嵌显示), 签名 frameCallback(frame, prompt)
         :return: {"passed": bool, "avgLogitDiff": float}
                  passed=True 表示判定为真人(非攻击)
                  avgLogitDiff 为通过帧的平均 logitDiff(仅作日志参考)
@@ -570,7 +587,11 @@ class LivenessDetector:
             self._putText(display, f"Silent check: {passCount}/{SILENT_PASS_FRAMES}", (10, 30))
 
         # 静默阶段最长 8 秒
-        state = self._runDetectLoop(cap, infer, onResult, 8.0, overlayFunc=overlay)
+        state = self._runDetectLoop(
+            cap, infer, onResult, 8.0, overlayFunc=overlay,
+            frameCallback=frameCallback, prompt="请不要动",
+            showWindow=(frameCallback is None)
+        )
         if state.get("interrupted"):
             return {"passed": False, "avgLogitDiff": 0.0}
 
@@ -582,11 +603,12 @@ class LivenessDetector:
             print(f"  ✗ 静默活体检测未通过({passCount}/{SILENT_PASS_FRAMES})")
             return {"passed": False, "avgLogitDiff": 0.0}
 
-    def _detectSingleAction(self, cap, action):
+    def _detectSingleAction(self, cap, action, frameCallback=None):
         """
         检测单个动作(复用通用 _runDetectLoop 的子线程推理 + 主线程显示架构)
         :param cap: cv2.VideoCapture 摄像头对象
         :param action: 动作名称<str>
+        :param frameCallback: 帧回调(供 UI 内嵌显示), 签名 frameCallback(frame, prompt)
         :return: (是否通过<bool>, 是否用户中断<bool>)
         """
         print(f"\n请{action}...")
@@ -614,7 +636,11 @@ class LivenessDetector:
             self._putText(display, f"Action: {action}", (10, 30))
             self._putText(display, f"Time: {remaining:.1f}s", (10, 60))
 
-        state = self._runDetectLoop(cap, infer, onResult, ACTION_TIMEOUT, overlayFunc=overlay)
+        state = self._runDetectLoop(
+            cap, infer, onResult, ACTION_TIMEOUT, overlayFunc=overlay,
+            frameCallback=frameCallback, prompt=f"请{action}",
+            showWindow=(frameCallback is None)
+        )
         if state.get("interrupted"):
             return False, True
 
@@ -623,7 +649,7 @@ class LivenessDetector:
             print(f"\n  [超时] {action} 未完成")
         return actionPassed, False
 
-    def runAdaptiveActions(self, cap):
+    def runAdaptiveActions(self, cap, frameCallback=None):
         """
         自适应主动动作检测(第二层防御)
         =================================
@@ -633,10 +659,11 @@ class LivenessDetector:
         - 动作失败: 100% 继续下一个,累计失败达 MAX_FAIL_COUNT 判定整体失败
         每个动作内部由 _runDetectLoop 统一管理"子线程推理 + 主线程显示"。
         :param cap: cv2.VideoCapture 摄像头对象
+        :param frameCallback: 帧回调(供 UI 内嵌显示), 签名 frameCallback(frame, prompt)
         :return: (是否通过<bool>, 是否用户中断<bool>)
         """
         # 姿态基准校准(相对偏移判定需要基准)
-        if not self.calibrateBaseline(cap):
+        if not self.calibrateBaseline(cap, frameCallback=frameCallback):
             return False, True  # 用户中断
 
         # 动作池随机打乱(随机顺序)
@@ -650,7 +677,8 @@ class LivenessDetector:
 
         while actionPool:
             action = actionPool.pop(0)
-            passed, interrupted = self._detectSingleAction(cap, action)
+            passed, interrupted = self._detectSingleAction(
+                cap, action, frameCallback=frameCallback)
             if interrupted:
                 return False, True
 
@@ -676,7 +704,8 @@ class LivenessDetector:
         # 动作池耗尽或已通过
         return True, False
 
-    def runLivenessCheck(self, cap, collectFrontal=True, progressCallback=None):
+    def runLivenessCheck(self, cap, collectFrontal=True, progressCallback=None,
+                         frameCallback=None):
         """
         执行完整活体检测流程(多层防御: 静默 + 自适应动作)
         ==================================================
@@ -691,6 +720,8 @@ class LivenessDetector:
                                  默认 None(不回调);stage 取值:
                                  "silent" 静默检测 / "action" 主动动作 / "frontal" 正脸采集
                                  (回调抛异常会沿调用链向上传播, 由调用方处理, 如取消任务)
+        :param frameCallback: 帧回调(供 UI 内嵌显示), 签名 frameCallback(frame, prompt),
+                              默认 None;传入后各阶段不再弹 OpenCV 窗口
         :return: 结果字典<dict>:
                  成功: {"success": True, "msg": "...", "frontalFrame": np.ndarray 或 None}
                  失败: {"success": False, "step": str, "msg": "..."}
@@ -707,14 +738,14 @@ class LivenessDetector:
         # Step 2: 静默活体检测(第一层),未通过(疑似照片/翻拍)直接拒绝
         _notify("silent", "静默活体检测中")
         if self.useSilent:
-            silentResult = self.runSilentCheck(cap)
+            silentResult = self.runSilentCheck(cap, frameCallback=frameCallback)
             if not silentResult["passed"]:
                 cv2.destroyAllWindows()
                 return {"success": False, "step": "静默检测", "msg": "静默活体检测未通过(疑似照片/翻拍)"}
 
         # Step 3: 无论静默检测置信度高低,都必须进行主动动作检测(第二层)
         _notify("action", "主动动作检测中")
-        passed, interrupted = self.runAdaptiveActions(cap)
+        passed, interrupted = self.runAdaptiveActions(cap, frameCallback=frameCallback)
         cv2.destroyAllWindows()
         if interrupted:
             return {"success": False, "step": "动作检测", "msg": "用户中断"}
@@ -725,17 +756,18 @@ class LivenessDetector:
         frontalFrame = None
         if collectFrontal:
             _notify("frontal", "正脸采集中")
-            frontalFrame = self._collectFrontalFrame(cap)
+            frontalFrame = self._collectFrontalFrame(cap, frameCallback=frameCallback)
 
         cv2.destroyAllWindows()
         return {"success": True, "msg": "活体检测通过", "frontalFrame": frontalFrame}
 
-    def _collectFrontalFrame(self, cap, timeout=5.0):
+    def _collectFrontalFrame(self, cap, timeout=5.0, frameCallback=None):
         """
         采集一帧正面人脸(动作通过后调用,用于身份识别)
         要求相对基准偏移接近 0(姿态摆正),避免用侧脸/表情帧做识别
         :param cap: cv2.VideoCapture 摄像头对象
         :param timeout: 超时时间<秒>
+        :param frameCallback: 帧回调(供 UI 内嵌显示), 签名 frameCallback(frame, prompt)
         :return: 正脸 BGR 帧<np.ndarray>,超时返回 None
         """
         print("\n[正脸采集] 请正对摄像头,用于身份识别...")
@@ -763,7 +795,11 @@ class LivenessDetector:
         def overlay(display, state):
             self._putText(display, "Keep frontal for recognition...", (10, 30))
 
-        state = self._runDetectLoop(cap, infer, onResult, timeout, overlayFunc=overlay)
+        state = self._runDetectLoop(
+            cap, infer, onResult, timeout, overlayFunc=overlay,
+            frameCallback=frameCallback, prompt="请正对摄像头",
+            showWindow=(frameCallback is None)
+        )
         if state.get("frontalFrame") is not None:
             return state["frontalFrame"]
 

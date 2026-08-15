@@ -441,6 +441,29 @@ def cleanOldModelFiles(faceDataDir, userName):
     return deletedCount
 
 
+def findLatestFeature(userName, faceDataDir=None):
+    """
+    查找指定用户最新的特征文件(.npy)
+    供识别流程自动定位特征(如系统级安全策略触发识别时, 无需手动传路径)
+    :param userName: 用户名<str>
+    :param faceDataDir: 特征数据目录<str>, 默认 FACE_DATA_DIR
+    :return: 特征文件绝对路径<str>, 用户无特征时返回 None
+    """
+    if faceDataDir is None:
+        faceDataDir = getFaceDataDir()
+    if not os.path.exists(faceDataDir):
+        return None
+    candidates = [
+        os.path.join(faceDataDir, f)
+        for f in os.listdir(faceDataDir)
+        if f.startswith(f"{userName}_") and f.endswith('.npy')
+    ]
+    if not candidates:
+        return None
+    # 取最新生成的(按修改时间)
+    return max(candidates, key=os.path.getmtime)
+
+
 # ====================================================================
 # 主入口 API(完整流程,供流程脚本调用)
 # ====================================================================

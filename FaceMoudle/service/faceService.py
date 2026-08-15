@@ -46,6 +46,7 @@ EVENT_FACE_RECOGNIZE_CANCEL = "FACE_RECOGNIZE_CANCEL"
 EVENT_FACE_RECOGNIZE_PROGRESS = "FACE_RECOGNIZE_PROGRESS"
 EVENT_FACE_RECOGNIZE_RESULT = "FACE_RECOGNIZE_RESULT"
 EVENT_FACE_ENROLL_REQUEST = "FACE_ENROLL_REQUEST"
+EVENT_FACE_ENROLL_CANCEL = "FACE_ENROLL_CANCEL"
 EVENT_FACE_ENROLL_PROGRESS = "FACE_ENROLL_PROGRESS"
 EVENT_FACE_ENROLL_RESULT = "FACE_ENROLL_RESULT"
 
@@ -73,6 +74,7 @@ class FaceService(Observer):
         super().__init__(name=MODULE_NAME)
         self._worker = None          # 当前识别任务 Worker
         self._cancel_event = threading.Event()  # 取消标志(与 Worker 共用)
+        self._frame_listener = None  # 帧监听器(UI 内嵌摄像头画面, 请求时注入)
 
     # ============================================================
     # 事件接收(覆写 Observer.all_event)
@@ -89,7 +91,9 @@ class FaceService(Observer):
         elif event == EVENT_FACE_RECOGNIZE_CANCEL:
             self._on_recognize_cancel()
         elif event == EVENT_FACE_ENROLL_REQUEST:
-            self._log("录入功能预留(尚未实现)")
+            self._on_enroll_request(content)
+        elif event == EVENT_FACE_ENROLL_CANCEL:
+            self._on_enroll_cancel()
         else:
             self._log(f"[未处理事件] {event}: {content}")
 
@@ -114,6 +118,15 @@ class FaceService(Observer):
 
         feature_path = content.get("featurePath", "")
         threshold = float(content.get("threshold", 0.85))
+        # 特征路径缺省时: 按用户名自动定位最新特征(供系统级安全策略触发识别)
+        if not feature_path:
+            user_name = str(content.get("userName", "")).strip()
+            if user_name:
+                face_detecter_dir = os.path.join(_FACE_MOUDLE_DIR, 'faceDetecter')
+                if face_detecter_dir not in sys.path:
+                    sys.path.insert(0, face_detecter_dir)
+                from faceDataGetter import findLatestFeature
+                feature_path = findLatestFeature(user_name) or ""
         if not feature_path or not os.path.exists(feature_path):
             self._log(f"特征文件不存在: {feature_path}")
             self._publish_result({
@@ -142,6 +155,108 @@ class FaceService(Observer):
             self._log("当前无识别任务, 忽略取消请求")
 
     # ============================================================
+    # 录入请求/取消处理
+    # ============================================================
+    def _on_enroll_request(self, content):
+        """
+        收到录入请求: 校验状态 → 启动后台任务
+        (识别/录入互斥: 同一时刻只有一个任务, 避免抢摄像头)
+        :param content: {"userName": str}
+        :return: None
+        """
+        if self._worker is not None and self._worker.is_running():
+            self._log("已有任务进行中, 拒绝新请求")
+            self._publish_enroll_result({
+                "success": False, "msg": "已有任务进行中", "step": "并发校验",
+                "featurePath": "", "cancelled": False,
+            })
+            return
+
+        user_name = str(content.get("userName", "")).strip()
+        if not user_name:
+            self._log("用户名不能为空")
+            self._publish_enroll_result({
+                "success": False, "msg": "用户名不能为空", "step": "参数校验",
+                "featurePath": "", "cancelled": False,
+            })
+            return
+
+        self._cancel_event.clear()
+        # 帧监听器(UI 内嵌摄像头画面用): 由请求方经 content 传入, 可为 None
+        self._frame_listener = content.get("frameListener")
+        self._worker = Worker(target=self._run_enroll_task, args=(user_name,))
+        self._worker.start()
+        self._log(f"录入任务已启动: {user_name}")
+
+    def _on_enroll_cancel(self):
+        """
+        收到录入取消请求: 置取消标志, 任务在进度回调处检查并中止
+        :return: None
+        """
+        if self._worker is not None and self._worker.is_running():
+            self._cancel_event.set()
+            self._log("已请求取消当前录入任务")
+        else:
+            self._log("当前无录入任务, 忽略取消请求")
+
+    def _run_enroll_task(self, user_name):
+        """
+        后台执行录入全流程(摄像头采集 + 图片清洗 + 特征提取)
+        :param user_name: 用户名<str>
+        :return: None
+        """
+        # 进度回调包装: 检查取消标志, 已取消则抛 TaskCancelled 中止流程
+        def progress(stage, detail=""):
+            if self._cancel_event.is_set():
+                raise TaskCancelled()
+            self._publish_enroll_progress(stage, detail)
+
+        # 帧回调包装: 检查取消 + 转发给 UI 帧监听器(如已注入)
+        def frame_cb(frame, prompt=""):
+            if self._cancel_event.is_set():
+                raise TaskCancelled()
+            if self._frame_listener is not None:
+                self._frame_listener(frame, prompt)
+
+        try:
+            # 动态导入生产录入流程(faceInputer/faceEnroll.py)
+            # 确保 faceInputer 目录在 sys.path(与调用方运行方式无关)
+            face_inputer_dir = os.path.join(_FACE_MOUDLE_DIR, 'faceInputer')
+            if face_inputer_dir not in sys.path:
+                sys.path.insert(0, face_inputer_dir)
+            from faceEnroll import runEnroll
+            result = runEnroll(user_name, progressCallback=progress,
+                               frameCallback=frame_cb)
+
+            self._publish_enroll_result({
+                "success": result.get("success", False),
+                "msg": result.get("msg", ""),
+                "step": result.get("step", ""),
+                "featurePath": result.get("featurePath", ""),
+                "cancelled": False,
+            })
+
+        except TaskCancelled:
+            # 用户取消
+            self._log("录入任务已取消")
+            self._publish_enroll_result({
+                "success": False, "msg": "用户取消", "step": "",
+                "featurePath": "", "cancelled": True,
+            })
+
+        except Exception as e:
+            # 未知异常: 发布失败结果(不崩溃)
+            self._log(f"录入任务异常: {e}")
+            self._publish_enroll_result({
+                "success": False, "msg": f"录入异常: {e}", "step": "",
+                "featurePath": "", "cancelled": False,
+            })
+
+        finally:
+            # 任务结束: 清理帧监听器(避免引用残留)
+            self._frame_listener = None
+
+    # ============================================================
     # 后台任务(在 Worker 线程执行)
     # ============================================================
     def _run_recognize_task(self, feature_path, threshold):
@@ -158,7 +273,10 @@ class FaceService(Observer):
             self._publish_progress(stage, detail)
 
         try:
-            # 动态导入识别工具库(避免本模块 import 链过重)
+            # 动态导入识别工具库(确保 facialRecognition 目录在 sys.path, 与调用方运行方式无关)
+            facial_recognition_dir = os.path.join(_FACE_MOUDLE_DIR, 'facialRecognition')
+            if facial_recognition_dir not in sys.path:
+                sys.path.insert(0, facial_recognition_dir)
             from recognition import runLivenessRecognize
             result = runLivenessRecognize(
                 feature_path, threshold=threshold, progressCallback=progress
@@ -215,6 +333,26 @@ class FaceService(Observer):
         """
         if self._scheduler is not None:
             self.notify_observer(EVENT_FACE_RECOGNIZE_RESULT, payload)
+
+    def _publish_enroll_progress(self, stage, detail=""):
+        """
+        发布录入进度事件
+        :param stage: 阶段名<str>: silent/action/frontal/capture/clean/extract
+        :param detail: 阶段明细<str>
+        :return: None
+        """
+        if self._scheduler is not None:
+            self.notify_observer(EVENT_FACE_ENROLL_PROGRESS,
+                                 {"stage": stage, "detail": detail})
+
+    def _publish_enroll_result(self, payload):
+        """
+        发布录入结果事件
+        :param payload: 结果字典<dict>
+        :return: None
+        """
+        if self._scheduler is not None:
+            self.notify_observer(EVENT_FACE_ENROLL_RESULT, payload)
 
     def _log(self, text):
         """日志输出"""

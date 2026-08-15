@@ -6,6 +6,7 @@ UI 基类验证(离屏模式, 不弹真实窗口)
 """
 import os
 import sys
+import time
 
 # 离屏渲染(不弹窗口)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -38,7 +39,9 @@ class FakeFaceService(Observer):
         if event == EVENT_FACE_RECOGNIZE_REQUEST:
             self.last_request = content
             # 模拟后台线程: 收到请求后异步发进度+结果
+            # sleep 1.0s: 给主线程"进入识别中状态"断言留窗口(过快会导致竞态)
             def work():
+                time.sleep(1.0)
                 self.notify_observer("FACE_RECOGNIZE_PROGRESS",
                                      {"stage": "silent", "detail": "静默检测中"})
                 self.notify_observer("FACE_RECOGNIZE_RESULT",

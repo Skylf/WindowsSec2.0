@@ -663,7 +663,8 @@ def coverDict(originalDict, newDict):
 # ====================================================================
 # 活体检测录入(主动活体检测 + 特征提取 + 保存)
 # ====================================================================
-def collectFrontalPhotos(cap, detector, count=TARGET_CAPTURE_COUNT, timeout=20.0):
+def collectFrontalPhotos(cap, detector, count=TARGET_CAPTURE_COUNT, timeout=20.0,
+                         frameCallback=None):
     """
     采集正脸照片(活体检测通过后调用,复用已打开的摄像头,不重新打开)
     只拍正脸(姿态摆正),不做动作引导
@@ -671,6 +672,8 @@ def collectFrontalPhotos(cap, detector, count=TARGET_CAPTURE_COUNT, timeout=20.0
     :param detector: LivenessDetector 实例(用于姿态判定正脸)
     :param count: 目标张数<int>,默认 30
     :param timeout: 超时时间<秒>,默认 20
+    :param frameCallback: 帧回调(供 UI 内嵌显示), 签名 frameCallback(frame, prompt),
+                          默认 None;传入后不再弹 OpenCV 窗口
     :return: 保存目录<str>,采集不足时也返回目录(下游 faceCheck 会过滤)
     """
     import time  # time.time 用于拍照间隔和超时
@@ -725,7 +728,9 @@ def collectFrontalPhotos(cap, detector, count=TARGET_CAPTURE_COUNT, timeout=20.0
 
     # 复用 _runDetectLoop 双线程架构(推理在子线程,主线程只显示/判定/保存,不再卡顿)
     collectState = detector._runDetectLoop(
-        cap, infer, onResult, timeout, overlayFunc=overlay, windowName="Liveness"
+        cap, infer, onResult, timeout, overlayFunc=overlay, windowName="Liveness",
+        frameCallback=frameCallback, prompt="请正对摄像头,保持不动",
+        showWindow=(frameCallback is None)
     )
     if collectState.get("interrupted"):
         print("用户 ESC 中断采集")
@@ -734,7 +739,7 @@ def collectFrontalPhotos(cap, detector, count=TARGET_CAPTURE_COUNT, timeout=20.0
     return save_dir
 
 
-def openCameraWithLiveness(userName):
+def openCameraWithLiveness(userName, progressCallback=None, frameCallback=None):
     """
     摄像头活体检测 + 正脸图像收集录入(实装方法)
     ==========================================
@@ -745,6 +750,12 @@ def openCameraWithLiveness(userName):
     4. 采集完成后关闭摄像头,返回图片目录
 
     :param userName: 用户名<str>(保留用于下游特征文件命名)
+    :param progressCallback: 阶段进度回调<Callable>,签名 progressCallback(stage, detail),
+                             默认 None(不回调);stage 取值:
+                             "silent"/"action"/"frontal"(活体检测阶段, 透传自 runLivenessCheck)
+                             "capture"(正脸照片采集中)
+    :param frameCallback: 帧回调(供 UI 内嵌显示), 签名 frameCallback(frame, prompt),
+                          默认 None;传入后活体检测与照片采集阶段不再弹 OpenCV 窗口
     :return: 结果字典<dict>:
              成功: {"success": True, "imgDir": str, "userName": str, "msg": "..."}
              失败: {"success": False, "step": str, "msg": "..."}
@@ -769,8 +780,11 @@ def openCameraWithLiveness(userName):
 
     print("摄像头已打开,开始活体检测...")
 
-    # Step 3: 执行活体检测(静默 + 主动动作)
-    result = detector.runLivenessCheck(cap, collectFrontal=False)
+    # Step 3: 执行活体检测(静默 + 主动动作),进度/帧透传
+    result = detector.runLivenessCheck(
+        cap, collectFrontal=False, progressCallback=progressCallback,
+        frameCallback=frameCallback
+    )
 
     # 活体检测失败,关闭摄像头后返回
     if not result["success"]:
@@ -781,7 +795,10 @@ def openCameraWithLiveness(userName):
 
     # Step 4: 活体通过 → 复用当前摄像头采集 30 张正脸(不关闭摄像头)
     print("\n活体检测通过!开始采集正脸照片...")
-    imgDir = collectFrontalPhotos(cap, detector, count=TARGET_CAPTURE_COUNT)
+    if progressCallback is not None:
+        progressCallback("capture", "正脸照片采集中")
+    imgDir = collectFrontalPhotos(cap, detector, count=TARGET_CAPTURE_COUNT,
+                                  frameCallback=frameCallback)
 
     # Step 5: 采集完成后关闭摄像头
     cap.release()

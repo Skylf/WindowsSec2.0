@@ -49,9 +49,10 @@ EVENT_FACE_RECOGNIZE_REQUEST = "FACE_RECOGNIZE_REQUEST"   # UI → FaceService: 
 EVENT_FACE_RECOGNIZE_CANCEL = "FACE_RECOGNIZE_CANCEL"     # UI → FaceService: 取消识别
 EVENT_FACE_RECOGNIZE_PROGRESS = "FACE_RECOGNIZE_PROGRESS" # FaceService → UI: 阶段进度
 EVENT_FACE_RECOGNIZE_RESULT = "FACE_RECOGNIZE_RESULT"     # FaceService → UI: 识别结果
-EVENT_FACE_ENROLL_REQUEST = "FACE_ENROLL_REQUEST"         # UI → FaceService: 发起录入(预留)
-EVENT_FACE_ENROLL_PROGRESS = "FACE_ENROLL_PROGRESS"       # FaceService → UI: 录入进度(预留)
-EVENT_FACE_ENROLL_RESULT = "FACE_ENROLL_RESULT"           # FaceService → UI: 录入结果(预留)
+EVENT_FACE_ENROLL_REQUEST = "FACE_ENROLL_REQUEST"         # UI → FaceService: 发起录入
+EVENT_FACE_ENROLL_CANCEL = "FACE_ENROLL_CANCEL"           # UI → FaceService: 取消录入(预留)
+EVENT_FACE_ENROLL_PROGRESS = "FACE_ENROLL_PROGRESS"       # FaceService → UI: 录入进度
+EVENT_FACE_ENROLL_RESULT = "FACE_ENROLL_RESULT"           # FaceService → UI: 录入结果
 EVENT_MODULE_STATUS = "MODULE_STATUS"                     # 调度 → 全体: 模块上线/下线
 
 
@@ -79,6 +80,9 @@ class GUI(QMainWindow):
     recognize_state_changed = pyqtSignal(bool)   # 识别状态变化(True=识别中), 页面据此使能/禁用按钮
     progress_received = pyqtSignal(str, str)     # 识别进度(stage, detail)
     result_received = pyqtSignal(object)         # 识别结果(dict)
+    enroll_progress_received = pyqtSignal(str, str)   # 录入进度(stage, detail)
+    enroll_result_received = pyqtSignal(object)       # 录入结果(dict)
+    frame_received = pyqtSignal(object, str)          # 摄像头帧(frame, prompt), 供全屏画面页显示
 
     def __init__(self, uiRsp):
         """
@@ -196,6 +200,53 @@ class GUI(QMainWindow):
         """
         self.result_received.emit(result_data)
 
+    def show_enroll_progress(self, stage, detail=""):
+        """
+        显示录入阶段进度(经信号转发给具体页面)
+        :param stage: 阶段名<str>, 如 "silent" / "capture" / "clean" / "extract"
+        :param detail: 阶段明细<str>
+        :return: None
+        """
+        self.enroll_progress_received.emit(stage, detail)
+
+    def show_enroll_result(self, result_data):
+        """
+        显示录入结果(经信号转发给具体页面)
+        :param result_data: 结果字典<dict>, 含 success/msg/step/featurePath/cancelled 等
+        :return: None
+        """
+        self.enroll_result_received.emit(result_data)
+
+    def show_frame(self, frame, prompt=""):
+        """
+        显示摄像头帧(经信号转发给全屏画面页; 跨线程调用安全,
+        pyqtSignal 自动 QueuedConnection 切主线程)
+        :param frame: BGR 帧<np.ndarray>
+        :param prompt: 当前提示词<str>(如 "请左转")
+        :return: None
+        """
+        self.frame_received.emit(frame, prompt)
+
+    # ---- 全屏画面页控制(由 MainWindow 覆写实现) ----
+    def show_live_page(self):
+        """切换到全屏摄像头画面页(录入/识别进行时调用, 由子类覆写)"""
+        pass
+
+    def hide_live_page(self):
+        """退出全屏画面页, 恢复原窗口(由子类覆写)"""
+        pass
+
+    def show_enroll_success(self):
+        """录入成功反馈(画面显示成功标识后自动退回, 由子类覆写)"""
+        pass
+
+    def get_rsp(self):
+        """
+        获取注入的响应层(UiRsp)引用(页面控件据此转发交互)
+        :return: UiRsp 或 None
+        """
+        return self._rsp
+
     # ============================================================
     # 动画预留(后续用 QPropertyAnimation 实现)
     # ============================================================
@@ -230,6 +281,7 @@ class UiRsp(Observer):
     # 交互状态常量
     STATE_IDLE = "IDLE"                 # 空闲
     STATE_RECOGNIZING = "RECOGNIZING"   # 识别中
+    STATE_ENROLLING = "ENROLLING"       # 录入中
 
     def __init__(self, gui=None):
         """
@@ -309,13 +361,59 @@ class UiRsp(Observer):
         self._log("请求取消识别...")
         self._send("faceService", {}, EVENT_FACE_RECOGNIZE_CANCEL)
 
-    def on_start_enroll(self, user_name):
+    def on_start_enroll(self, user_name) -> bool:
         """
-        [开始录入] 按钮响应(预留: 录入页实现后启用)
+        [开始录入] 按钮响应: 校验状态与用户名 → 发录入请求(经中心调度)
         :param user_name: 用户名<str>
+        :return: 是否成功发起<bool>(状态忙/用户名空/发送失败返回 False)
+        """
+        # 防重复: 识别/录入进行中拒绝新任务
+        if self._state != self.STATE_IDLE:
+            self._log(f"当前状态 {self._state}, 请等待任务完成后再录入")
+            return False
+        if not user_name or not user_name.strip():
+            self._log("用户名不能为空")
+            return False
+
+        # 先发送请求(携带帧监听器, 供 FaceService 回调摄像头画面), 成功才进入录入中状态
+        sent = self._send("faceService", {
+            "userName": user_name.strip(),
+            "frameListener": self._on_frame,
+        }, EVENT_FACE_ENROLL_REQUEST)
+        if not sent:
+            self._log("录入请求发送失败(目标模块不存在或未注册调度)")
+            return False
+
+        self._state = self.STATE_ENROLLING
+        self._gui.set_recognizing(True)   # 复用忙碌信号(禁用相关按钮)
+        self._gui.show_live_page()        # 切换全屏摄像头画面页
+        self._log(f"发起录入: {user_name.strip()}")
+        return True
+
+    def on_cancel_enroll(self):
+        """
+        [退出识别/取消录入] 响应: 发取消请求(全屏画面页退出按钮调用)
+        状态由 ENROLL_RESULT(cancelled) 事件确认后回 IDLE
         :return: None
         """
-        self._log(f"录入功能预留: userName={user_name}")
+        if self._state != self.STATE_ENROLLING:
+            return
+        self._log("请求取消录入...")
+        self._send("faceService", {}, EVENT_FACE_ENROLL_CANCEL)
+
+    # ============================================================
+    # 帧监听(摄像头画面 → 全屏画面页)
+    # ============================================================
+    def _on_frame(self, frame, prompt=""):
+        """
+        摄像头帧回调(由 FaceService 后台线程调用, 线程安全:
+        经 GUI.frame_received 信号自动切主线程更新画面)
+        :param frame: BGR 帧<np.ndarray>
+        :param prompt: 当前提示词<str>
+        :return: None
+        """
+        if self._gui is not None:
+            self._gui.show_frame(frame, prompt)
 
     # ============================================================
     # 文件操作(本地交互, 不经过中心调度)
@@ -332,6 +430,26 @@ class UiRsp(Observer):
             self._gui, "选择已注册特征文件", "", "特征文件 (*.npy)"
         )
         return path if path else None
+
+    def check_current_feature(self, user_name):
+        """
+        检查指定用户是否已有特征(文件操作类, 供录入页显示特征状态)
+        :param user_name: 用户名<str>
+        :return: (是否存在<bool>, 特征文件名<str> 或 None)
+        """
+        try:
+            import os as _os
+            project_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+            face_detecter_dir = _os.path.join(project_root, 'FaceMoudle', 'faceDetecter')
+            if face_detecter_dir not in sys.path:
+                sys.path.insert(0, face_detecter_dir)
+            from faceDataGetter import findLatestFeature
+            feature_path = findLatestFeature(user_name)
+            if feature_path:
+                return True, _os.path.basename(feature_path)
+        except Exception as e:
+            print(f"[UiRsp] 检查特征状态失败: {e}")
+        return False, None
 
     # ============================================================
     # 事件接收(覆写 Observer.all_event, 由中心调度在主线程投递)
@@ -358,15 +476,35 @@ class UiRsp(Observer):
             self._gui.show_result(content)
             self._log(f"[结果] {content}")
 
+        elif event == EVENT_FACE_ENROLL_PROGRESS:
+            # 录入进度: {stage: str, detail: str}
+            stage = content.get("stage", "")
+            detail = content.get("detail", "")
+            self._gui.show_enroll_progress(stage, detail)
+            self._log(f"[录入进度] {stage}: {detail}")
+
+        elif event == EVENT_FACE_ENROLL_RESULT:
+            # 录入结果: {success, msg, step, featurePath, cancelled}
+            # 收到结果 → 状态机回 IDLE, 恢复按钮
+            self._state = self.STATE_IDLE
+            self._gui.set_recognizing(False)
+            if content.get("success"):
+                # 成功: 画面显示绿色对勾 + "录入成功", 1.5s 后自动退回
+                print(f"[UiRsp] 录入成功, 显示成功反馈后自动退回: {content.get('featurePath')}")
+                self._gui.show_enroll_success()
+            else:
+                # 失败/取消: 立即退回原窗口
+                print(f"[UiRsp] 收到录入结果(非成功), 立即退回: success={content.get('success')} "
+                      f"cancelled={content.get('cancelled')}")
+                self._gui.hide_live_page()
+            self._gui.show_enroll_result(content)
+            self._log(f"[录入结果] {content}")
+
         elif event == EVENT_MODULE_STATUS:
             # 模块上线/下线: {moduleName: str, online: bool}
             module_name = content.get("moduleName", "?")
             online = content.get("online", False)
             self._gui.update_status(f"模块 {module_name} {'上线' if online else '下线'}")
-
-        elif event == EVENT_FACE_ENROLL_PROGRESS or event == EVENT_FACE_ENROLL_RESULT:
-            # 录入进度/结果(预留)
-            self._log(f"[录入] {event}: {content}")
 
         else:
             # 未知事件: 记录但不崩溃

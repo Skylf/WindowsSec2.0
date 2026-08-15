@@ -41,9 +41,33 @@ def fake_run_liveness(feature_path, threshold=0.85, progressCallback=None):
 fake_recognition.runLivenessRecognize = fake_run_liveness
 sys.modules['recognition'] = fake_recognition
 
+# ---- mock faceEnroll.runEnroll(避免真实摄像头) ----
+fake_enroll = types.ModuleType('faceEnroll')
+
+
+def fake_run_enroll(user_name, progressCallback=None, frameCallback=None):
+    """模拟录入流程: 发进度(含帧回调) → 返回成功"""
+    if progressCallback:
+        progressCallback("silent", "静默检测")
+    if progressCallback:
+        progressCallback("capture", "照片采集中")
+    if frameCallback:
+        import numpy as np
+        frameCallback(np.zeros((100, 100, 3), dtype=np.uint8), "请正对摄像头")
+    time.sleep(0.2)  # 模拟耗时(取消测试窗口)
+    if progressCallback:
+        progressCallback("extract", "特征提取中")
+    return {"success": True, "msg": "录入完成", "step": "",
+            "featurePath": rf"D:\fake\{user_name}_feat.npy"}
+
+
+fake_enroll.runEnroll = fake_run_enroll
+sys.modules['faceEnroll'] = fake_enroll
+
 from observerObject import Observer
 from communicationObject import CommunicationObject
-from faceService import FaceService, EVENT_FACE_RECOGNIZE_REQUEST, EVENT_FACE_RECOGNIZE_CANCEL
+from faceService import (FaceService, EVENT_FACE_RECOGNIZE_REQUEST,
+                         EVENT_FACE_RECOGNIZE_CANCEL, EVENT_FACE_ENROLL_REQUEST)
 
 
 class Collector(Observer):
@@ -53,12 +77,18 @@ class Collector(Observer):
         super().__init__(name="collector")
         self.progress = []
         self.results = []
+        self.enroll_progress = []
+        self.enroll_results = []
 
     def all_event(self, event, content, *args, **kwargs):
         if event == "FACE_RECOGNIZE_PROGRESS":
             self.progress.append(content)
         elif event == "FACE_RECOGNIZE_RESULT":
             self.results.append(content)
+        elif event == "FACE_ENROLL_PROGRESS":
+            self.enroll_progress.append(content)
+        elif event == "FACE_ENROLL_RESULT":
+            self.enroll_results.append(content)
 
 
 def find_real_npy():
@@ -68,11 +98,19 @@ def find_real_npy():
 
 
 def wait_result(collector, timeout=5.0):
-    """等待结果事件"""
+    """等待识别结果事件"""
     deadline = time.time() + timeout
     while len(collector.results) == 0 and time.time() < deadline:
         time.sleep(0.02)
     return len(collector.results) > 0
+
+
+def wait_enroll_result(collector, timeout=5.0):
+    """等待录入结果事件"""
+    deadline = time.time() + timeout
+    while len(collector.enroll_results) == 0 and time.time() < deadline:
+        time.sleep(0.02)
+    return len(collector.enroll_results) > 0
 
 
 def main():
@@ -141,6 +179,52 @@ def main():
     print("[5] 无任务时取消 → 忽略不崩溃")
     comm.communication_to(col, "faceService", {}, EVENT_FACE_RECOGNIZE_CANCEL)
     print("  ✓ 忽略取消请求")
+
+    print("[6] 录入请求 → 后台任务 → 进度/结果事件回流")
+    col.enroll_progress.clear()
+    col.enroll_results.clear()
+    comm.communication_to(col, "faceService",
+                          {"userName": "test_user"}, EVENT_FACE_ENROLL_REQUEST)
+    assert wait_enroll_result(col, 5), "应收到录入结果"
+    # 进度与结果按序发布, 结果到达时进度列表应完整
+    stages = [p["stage"] for p in col.enroll_progress]
+    assert stages == ["silent", "capture", "extract"], f"录入进度阶段异常: {stages}"
+    er = col.enroll_results[-1]
+    assert er["success"] and er["featurePath"].endswith("test_user_feat.npy") and not er["cancelled"]
+    print(f"  ✓ 录入进度: {stages}")
+    print(f"  ✓ 录入结果: {er}")
+
+    print("[7] 录入用户名校验: 空用户名 → 失败结果")
+    col.enroll_results.clear()
+    comm.communication_to(col, "faceService", {"userName": "  "}, EVENT_FACE_ENROLL_REQUEST)
+    assert wait_enroll_result(col, 5)
+    assert not col.enroll_results[-1]["success"] and "用户名" in col.enroll_results[-1]["msg"]
+    print(f"  ✓ 空用户名被拒绝: {col.enroll_results[-1]['msg']}")
+
+    print("[8] 任务互斥: 识别进行中发录入请求 → 拒绝")
+    col.enroll_results.clear()
+    comm.communication_to(col, "faceService",
+                          {"featurePath": npy_path}, EVENT_FACE_RECOGNIZE_REQUEST)
+    time.sleep(0.05)  # 识别任务进入 sleep 窗口
+    comm.communication_to(col, "faceService",
+                          {"userName": "other"}, EVENT_FACE_ENROLL_REQUEST)
+    assert wait_enroll_result(col, 5)
+    assert "已有任务进行中" in col.enroll_results[-1]["msg"], f"应拒绝: {col.enroll_results[-1]}"
+    print(f"  ✓ 识别/录入互斥: {col.enroll_results[-1]['msg']}")
+    # 等识别任务自然结束
+    deadline = time.time() + 5
+    while svc._worker is not None and svc._worker.is_running() and time.time() < deadline:
+        time.sleep(0.02)
+
+    print("[9] 录入取消: 任务运行中发 CANCEL → 结果 cancelled=True")
+    col.enroll_results.clear()
+    comm.communication_to(col, "faceService",
+                          {"userName": "cancel_me"}, EVENT_FACE_ENROLL_REQUEST)
+    time.sleep(0.05)
+    comm.communication_to(col, "faceService", {}, "FACE_ENROLL_CANCEL")
+    assert wait_enroll_result(col, 5)
+    assert col.enroll_results[-1]["cancelled"], f"应为取消结果: {col.enroll_results[-1]}"
+    print(f"  ✓ 录入取消生效: {col.enroll_results[-1]['msg']}")
 
     print("\n=== FaceService 验证全部通过 ✓ ===")
 
