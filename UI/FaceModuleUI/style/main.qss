@@ -400,13 +400,6 @@ QLineEdit#pathEdit {
 QLineEdit#pathEdit:focus { border: 1px solid #3B82F6; }
 QLineEdit#pathEdit:disabled { color: #6B7280; }
 
-/* ── 去水印页: 选项说明(适用情景/速度提示) ── */
-QLabel#hintLabel {
-    color: #6B7280;
-    font-size: 11px;
-    padding-left: 2px;
-}
-
 /* ── 去水印页: 进度条 ── */
 QProgressBar#watermarkProgress {
     background-color: #1F2937;

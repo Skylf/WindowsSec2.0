@@ -1892,9 +1892,6 @@ class WatermarkPage(QWidget):
         for key, value in self._QUALITY_OPTIONS:
             self.quality_combo.addItem(get_text(key), value)
         self.quality_combo.currentIndexChanged.connect(self._on_quality_changed)
-        self.quality_hint_label = QLabel("")
-        self.quality_hint_label.setObjectName("hintLabel")
-        self.quality_hint_label.setWordWrap(True)
         self._on_quality_changed(self.quality_combo.currentIndex())
         self.gpu_combo = QComboBox()
         for key, value in self._GPU_OPTIONS:
@@ -1930,7 +1927,7 @@ class WatermarkPage(QWidget):
         layout.addLayout(self._field_row("watermark.output", self.output_edit, output_btn))
         layout.addSpacing(4)
         layout.addLayout(self._combo_row("watermark.mode", self.mode_combo))
-        layout.addLayout(self._quality_row())
+        layout.addLayout(self._combo_row("watermark.quality", self.quality_combo))
         layout.addLayout(self._combo_row("watermark.gpu", self.gpu_combo))
         layout.addLayout(self._bbox_row())
         layout.addSpacing(4)
@@ -1968,13 +1965,6 @@ class WatermarkPage(QWidget):
         row.addWidget(combo, 1)
         return row
 
-    def _quality_row(self) -> QVBoxLayout:
-        """修复质量: 下拉 + 适用情景/速度说明"""
-        row = QVBoxLayout()
-        row.addLayout(self._combo_row("watermark.quality", self.quality_combo))
-        row.addWidget(self.quality_hint_label)
-        return row
-
     @staticmethod
     def _switch_row(label_key, switch) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -1990,16 +1980,12 @@ class WatermarkPage(QWidget):
         appConfig.set_watermark_sound_enabled(checked)
 
     def _on_quality_changed(self, index):
-        """修复质量切换 → 更新适用情景/速度提示"""
+        """修复质量切换 → 悬浮提示(适用情景/速度), 不占布局空间"""
         quality = self.quality_combo.itemData(index)
         if quality == "lama":
-            self.quality_hint_label.setText(
-                get_text("watermark.quality.lama.hint"))
             self.quality_combo.setToolTip(
                 get_text("watermark.quality.lama.hint"))
         else:
-            self.quality_hint_label.setText(
-                get_text("watermark.quality.fast.hint"))
             self.quality_combo.setToolTip(
                 get_text("watermark.quality.fast.hint"))
 
