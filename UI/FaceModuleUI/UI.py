@@ -1827,11 +1827,16 @@ class WatermarkPage(QWidget):
         self.progress_bar.setObjectName("watermarkProgress")
         self.progress_bar.setFormat("%p%")
 
-        self.status_label = QLabel(get_text("watermark.status.idle"))
-        self.status_label.setObjectName("settingValue")
-        self.status_label.setWordWrap(True)
+        # 打开保存位置(处理成功后显示)
+        self.open_btn = QPushButton(get_text("watermark.open"))
+        self.open_btn.setObjectName("blueBtn")
+        self.open_btn.setVisible(False)
+        self.open_btn.clicked.connect(self._on_open_output)
+        open_row = QHBoxLayout()
+        open_row.addStretch(1)
+        open_row.addWidget(self.open_btn)
 
-        # 处理日志区(实时展示当前阶段, 供用户了解正在做什么)
+        # 处理日志区(合并"选择视频后点击开始处理"提示: 未开始处理时显示为占位文案)
         log_title = QLabel(get_text("watermark.log.title"))
         log_title.setObjectName("cardText")
         self.log_text = QPlainTextEdit()
@@ -1850,9 +1855,9 @@ class WatermarkPage(QWidget):
         layout.addWidget(title)
         layout.addSpacing(10)
         layout.addWidget(self.progress_bar)
-        layout.addSpacing(8)
-        layout.addWidget(self.status_label)
-        layout.addSpacing(8)
+        layout.addSpacing(4)
+        layout.addLayout(open_row)
+        layout.addSpacing(4)
         layout.addWidget(log_title)
         layout.addWidget(self.log_text)
         layout.addSpacing(8)
@@ -1900,6 +1905,11 @@ class WatermarkPage(QWidget):
         self.bbox_edit.setObjectName("pathEdit")
         self.bbox_edit.setPlaceholderText(get_text("watermark.bbox.placeholder"))
 
+        # 完成提示音开关(设置项, 存 appConfig)
+        self.sound_switch = SwitchButton()
+        self.sound_switch.setChecked(appConfig.is_watermark_sound_enabled())
+        self.sound_switch.toggled.connect(self._on_sound_toggled)
+
         # 开始/取消按钮
         self.start_btn = QPushButton(get_text("watermark.btn.start"))
         self.start_btn.setObjectName("primaryBtn")
@@ -1921,6 +1931,8 @@ class WatermarkPage(QWidget):
         layout.addLayout(self._quality_row())
         layout.addLayout(self._combo_row("watermark.gpu", self.gpu_combo))
         layout.addLayout(self._bbox_row())
+        layout.addSpacing(4)
+        layout.addLayout(self._switch_row("watermark.sound", self.sound_switch))
         layout.addStretch(1)
         btn_row = QHBoxLayout()
         btn_row.addWidget(self.start_btn)
@@ -1957,6 +1969,20 @@ class WatermarkPage(QWidget):
         row.addWidget(self.quality_hint_label)
         return row
 
+    @staticmethod
+    def _switch_row(label_key, switch) -> QHBoxLayout:
+        row = QHBoxLayout()
+        label = QLabel(get_text(label_key))
+        label.setObjectName("settingLabel")
+        row.addWidget(label)
+        row.addStretch(1)
+        row.addWidget(switch)
+        return row
+
+    def _on_sound_toggled(self, checked):
+        """完成提示音开关 → appConfig"""
+        appConfig.set_watermark_sound_enabled(checked)
+
     def _on_quality_changed(self, index):
         """修复质量切换 → 更新适用情景/速度提示"""
         quality = self.quality_combo.itemData(index)
@@ -1973,36 +1999,36 @@ class WatermarkPage(QWidget):
 
     def _bbox_row(self) -> QVBoxLayout:
         row = QVBoxLayout()
-        head = QHBoxLayout()
         label = QLabel(get_text("watermark.bbox"))
         label.setObjectName("settingLabel")
         select_btn = QPushButton(get_text("watermark.bbox.select"))
         select_btn.setObjectName("primaryBtn")
+        select_btn.setMinimumWidth(72)
         select_btn.clicked.connect(self._on_select_click)
-        head.addWidget(label)
-        head.addStretch(1)
-        head.addWidget(select_btn)
-        row.addLayout(head)
-        row.addWidget(self.bbox_edit)
+        edit_row = QHBoxLayout()
+        edit_row.addWidget(self.bbox_edit, 1)
+        edit_row.addWidget(select_btn)
+        row.addWidget(label)
+        row.addLayout(edit_row)
         return row
 
     def _on_select_click(self):
         """[框选...] → 打开视频框选对话框, 确认后回填输入框"""
         input_path = self.input_edit.text().strip().strip('"')
         if not input_path:
-            self.status_label.setText(
-                get_text("watermark.status.fail", "请先选择输入视频"))
+            self._append_log(get_text("watermark.log.need_input"), "fail")
             return
         if not os.path.isfile(input_path):
-            self.status_label.setText(
-                get_text("watermark.status.fail", f"输入文件不存在: {input_path}"))
+            self._append_log(
+                get_text("watermark.log.need_input", f"输入文件不存在: {input_path}"),
+                "fail")
             return
         dlg = WatermarkSelectDialog(input_path, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             text = dlg.rectsText()
             if text:
                 self.bbox_edit.setText(text)
-                self.status_label.setText(
+                self._append_log(
                     get_text("watermark.status.select_done", dlg.rects().__len__()))
 
     # ============================================================
@@ -2026,17 +2052,19 @@ class WatermarkPage(QWidget):
         """[开始处理] → UiRsp.on_watermark_start"""
         input_path = self.input_edit.text().strip().strip('"')
         if not input_path:
-            self.status_label.setText(get_text("watermark.status.fail", "未选择输入视频"))
+            self._append_log(get_text("watermark.log.need_input"), "fail")
             return
         if not os.path.isfile(input_path):
-            self.status_label.setText(
-                get_text("watermark.status.fail", f"输入文件不存在: {input_path}"))
+            self._append_log(
+                get_text("watermark.log.need_input", f"输入文件不存在: {input_path}"),
+                "fail")
             return
         output_path = self.output_edit.text().strip().strip('"') or None
         # 手动水印区域(可选): x1,y1,x2,y2
         manual_bbox = self._parse_bbox()
         if manual_bbox is self._PARSE_ERROR:
             return   # 格式错误已提示
+        self.open_btn.setVisible(False)
         if self._rsp is not None:
             self._log_start(input_path, output_path, manual_bbox)
             self._rsp.on_watermark_start({
@@ -2048,7 +2076,8 @@ class WatermarkPage(QWidget):
                 "manual_bbox": manual_bbox,
             })
         else:
-            self.status_label.setText(get_text("watermark.status.fail", "未绑定 UiRsp"))
+            self._append_log(get_text("watermark.status.fail", "未绑定 UiRsp"),
+                             "fail")
 
     def _log_start(self, input_path, output_path, manual_bbox):
         """启动日志: 记录本次任务的参数摘要(带阶段标签)"""
@@ -2097,9 +2126,8 @@ class WatermarkPage(QWidget):
                 return boxes[0]
             return boxes
         except ValueError:
-            self.status_label.setText(
-                get_text("watermark.status.fail",
-                         "水印区域格式应为 x1,y1,x2,y2(像素), 多个用分号分隔"))
+            self._append_log(
+                get_text("watermark.log.region_error"), "fail")
             return self._PARSE_ERROR
 
     def _on_cancel_click(self):
@@ -2133,12 +2161,10 @@ class WatermarkPage(QWidget):
         return "info"
 
     def _on_progress(self, progress_data):
-        """处理进度 → 进度条(含 ETA) + 状态 + 阶段日志"""
+        """处理进度 → 进度条(含 ETA) + 阶段日志"""
         percent = int(progress_data.get("percent", 0))
         info = progress_data.get("info", "")
         self.progress_bar.setValue(percent)
-        self.status_label.setText(
-            get_text("watermark.status.processing", percent, info))
         # 阶段日志: 每 10% 里程碑 或 阶段切换 时追加(避免每帧刷屏)
         stage = self._stage_of(info)
         last_stage = getattr(self, "_last_log_stage", None)
@@ -2197,16 +2223,41 @@ class WatermarkPage(QWidget):
         stage_name = get_text(f"watermark.log.stage.{stage}")
         self.log_text.appendPlainText(f"[{ts}] [{stage_name}] {text}{suffix}")
 
+    def _play_sound(self, kind):
+        """完成提示音(开关关闭时不播放): success / fail / cancel"""
+        try:
+            if not appConfig.is_watermark_sound_enabled():
+                return
+            import winsound
+            if kind == "success":
+                winsound.MessageBeep(winsound.MB_OK)
+            elif kind == "cancel":
+                winsound.MessageBeep(winsound.MB_ICONQUESTION)
+            else:
+                winsound.MessageBeep(winsound.MB_ICONERROR)
+        except Exception:
+            pass   # 无声卡/非 Windows 等环境静默
+
+    def _on_open_output(self):
+        """[打开保存位置] → 资源管理器定位输出文件"""
+        path = getattr(self, "_last_output_path", "")
+        if not path or not os.path.exists(path):
+            return
+        try:
+            os.startfile(os.path.dirname(path))   # 打开所在文件夹
+        except OSError:
+            pass
+
     def _on_result(self, result_data):
-        """处理结果 → 进度条复位 + 结果文本 + 日志"""
+        """处理结果 → 进度条复位 + 结果文本 + 日志 + 提示音"""
         if result_data.get("cancelled"):
             # 用户取消(与失败区分)
-            self.status_label.setText(get_text("watermark.status.cancelled"))
             self.result_text.appendPlainText(get_text("watermark.result.cancelled"))
             self._append_log(get_text("watermark.log.cancelled"), "fail")
+            self._play_sound("cancel")
+            self.open_btn.setVisible(False)
         elif result_data.get("success"):
-            self.status_label.setText(
-                get_text("watermark.status.done", result_data.get("output_path", "")))
+            self._last_output_path = result_data.get("output_path", "")
             if result_data.get("watermark_bbox"):
                 self.result_text.appendPlainText(get_text(
                     "watermark.result.done",
@@ -2233,13 +2284,16 @@ class WatermarkPage(QWidget):
                 self._append_log(get_text("watermark.log.hint_fast"))
             if str(result_data.get("note", "")).startswith("手动"):
                 self._append_log(get_text("watermark.log.hint_residue"))
+            # 打开保存位置按钮
+            self.open_btn.setVisible(True)
+            self._play_sound("success")
         else:
-            self.status_label.setText(
-                get_text("watermark.status.fail", result_data.get("msg", "")))
             self.result_text.appendPlainText(
                 get_text("watermark.status.fail", result_data.get("msg", "")))
             self._append_log(get_text("watermark.log.fail",
                                       result_data.get("msg", "")), "fail")
+            self._play_sound("fail")
+            self.open_btn.setVisible(False)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
 

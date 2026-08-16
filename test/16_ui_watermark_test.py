@@ -54,15 +54,15 @@ def makeVideo(path, frames=60, size=(320, 240)):
 
 
 def waitResult(app, page, timeout=60.0):
-    """等待处理结果(状态标签出现 处理完成/处理失败/已取消)"""
+    """等待处理结果(日志区出现 处理完成/处理失败/已取消)"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         app.processEvents()
-        text = page.status_label.text()
-        if any(k in text for k in ("处理完成", "处理失败", "已取消")):
+        text = page.log_text.toPlainText()
+        if "处理完成 |" in text or "处理失败" in text or "已取消" in text:
             return text
         time.sleep(0.02)
-    return page.status_label.text()
+    return page.log_text.toPlainText()
 
 
 def main():
@@ -124,7 +124,7 @@ def main():
 
     print("[4] 等待处理结果 → 结果文本 + 输出文件")
     final_status = waitResult(app, page)
-    assert "处理完成" in final_status, f"应处理完成: {final_status}"
+    assert "处理完成 |" in final_status, f"应处理完成: {final_status}"
     text = page.result_text.toPlainText()
     assert "demo_nowm.mp4" in text, f"结果应含输出文件名: {text}"
     assert "水印区域" in text, f"结果应含水印区域: {text}"
@@ -138,7 +138,11 @@ def main():
     assert "[处理]" in log, f"日志应含处理阶段标签: {log}"
     assert "处理完成" in log, f"日志应含完成信息: {log}"
     assert page.progress_bar.format() == "%p%", "完成后 ETA 应复位"
-    print(f"  ✓ 处理完成 → 输出文件存在 + 详细日志正常({len(log.splitlines())} 行)")
+    # 打开保存位置按钮(成功后显示)
+    assert page.open_btn.isVisible(), "成功后应显示打开保存位置按钮"
+    assert page.open_btn.text() == "打开保存位置"
+    print(f"  ✓ 处理完成 → 输出文件存在 + 详细日志正常({len(log.splitlines())} 行)"
+          f" + 打开按钮显示")
 
     print("[5] 手动指定水印区域(蒙太奇/半透明水印场景的可靠路径)")
     small = os.path.join(tmp, "manual.mp4")
@@ -146,29 +150,27 @@ def main():
     page.input_edit.setText(small)
     page.output_edit.setText(os.path.join(tmp, "manual_out.mp4"))
     page.bbox_edit.setText("200,30,280,70")
-    page.status_label.setText("")          # 清除上一步遗留状态, 防止误判
     page.start_btn.click()
     final_status = waitResult(app, page)
-    assert "处理完成" in final_status, f"应处理完成: {final_status}"
+    assert "处理完成 |" in final_status, f"应处理完成: {final_status}"
     assert "手动指定水印区域" in page.result_text.toPlainText(), \
         "结果应注明手动区域"
     assert os.path.isfile(os.path.join(tmp, "manual_out.mp4"))
-    # 非法格式 → 应拒绝并提示, 不发起任务
+    # 非法格式 → 应拒绝并提示(写日志区), 不发起任务
     page.bbox_edit.setText("abc,def")
     page.start_btn.click()
     pump(app, 0.5)
-    assert "格式应为" in page.status_label.text(), \
-        f"非法格式应提示: {page.status_label.text()}"
+    assert "格式应为" in page.log_text.toPlainText(), \
+        f"非法格式应提示: {page.log_text.toPlainText()}"
     page.bbox_edit.setText("")
     print("  ✓ 手动区域处理成功 + 非法格式校验")
 
     print("[5b] 手动多区域(分号分隔, 并集 mask)")
     page.output_edit.setText(os.path.join(tmp, "manual_multi.mp4"))
     page.bbox_edit.setText("200,30,280,70;20,150,90,200")
-    page.status_label.setText("")
     page.start_btn.click()
     final_status = waitResult(app, page)
-    assert "处理完成" in final_status, f"应处理完成: {final_status}"
+    assert "处理完成 |" in final_status, f"应处理完成: {final_status}"
     assert "2 块" in page.result_text.toPlainText(), \
         f"结果应注明 2 块: {page.result_text.toPlainText()}"
     assert os.path.isfile(os.path.join(tmp, "manual_multi.mp4"))
@@ -206,7 +208,6 @@ def main():
     page.input_edit.setText(big_video)
     page.output_edit.setText(os.path.join(tmp, "big_out.mp4"))
     page.bbox_edit.setText("")           # 清空残留(走自动检测, 独立于前序步骤)
-    page.status_label.setText("")          # 清除上一步遗留状态
     page.start_btn.click()
     pump(app, 1.5)          # 留出处理时间(大视频)
     page.cancel_btn.click()
@@ -215,6 +216,7 @@ def main():
     assert not os.path.isfile(os.path.join(tmp, "big_out.mp4")), \
         "取消时应删除不完整输出"
     assert page.start_btn.isEnabled(), "取消后开始按钮应恢复"
+    assert page.open_btn.isVisible() is False, "取消后打开按钮应隐藏"
     print(f"  ✓ 取消成功(不完整输出已清理)")
 
     print("\n=== UI 视频去水印接线验证全部通过 ✓ ===")

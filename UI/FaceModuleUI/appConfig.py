@@ -32,6 +32,7 @@ _CONFIG = {
     "threshold_level": DEFAULT_THRESHOLD_LEVEL,  # 识别阈值档位
     "face_login_enabled": True,                  # 人脸识别登录开关
     "liveness_enabled": True,                    # 活体检测开关
+    "watermark_sound_enabled": True,             # 视频去水印完成提示音开关
 }
 
 
@@ -80,3 +81,13 @@ def is_liveness_enabled() -> bool:
 def set_liveness_enabled(enabled):
     """设置活体检测开关"""
     _CONFIG["liveness_enabled"] = bool(enabled)
+
+
+def is_watermark_sound_enabled() -> bool:
+    """视频去水印完成提示音开关是否开启"""
+    return bool(_CONFIG.get("watermark_sound_enabled", True))
+
+
+def set_watermark_sound_enabled(enabled):
+    """设置视频去水印完成提示音开关"""
+    _CONFIG["watermark_sound_enabled"] = bool(enabled)
