@@ -18,44 +18,96 @@ import log
 # ====================================================================
 # 静态水印: 时域中值自动检测
 # ====================================================================
+# 面积过滤参数
+MIN_AREA_RATIO = 0.0005    # 最小静止块面积: 0.05% 帧面积(再小视为噪声)
+MAX_AREA_RATIO = 0.15      # 最大静止块面积: 15% 帧面积(再大视为静止主体/背景)
+MAX_TOTAL_RATIO = 0.25     # 静止块总面积上限: 25%(超出视为整屏静止, 拒检)
+
+
+def _sampleFrames(video_path, count, progress_callback=None):
+    """
+    全片均匀采样帧(灰度), 避免只采片头导致静态场景误判为水印
+    :param video_path: 视频路径<str>
+    :param count: 期望采样帧数<int>
+    :param progress_callback: 进度回调(i, total)
+    :return: (帧列表<list<np.ndarray>>, 视频信息 dict)
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        log.error("watermarkDetector", f"无法打开视频: {video_path}")
+        return None, None
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    info = {"total": total, "fps": cap.get(cv2.CAP_PROP_FPS),
+            "w": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            "h": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}
+    count = min(count, total) if total > 0 else count
+
+    frames = []
+    if total > count:
+        # 均匀跳帧采样(随机场景均覆盖)
+        indices = np.linspace(0, total - 1, count).astype(int)
+        for i, idx in enumerate(indices):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+            ret, frame = cap.read()
+            if not ret:
+                log.warn("watermarkDetector",
+                         f"跳帧读取失败(第 {idx} 帧), 回退顺序采样")
+                frames = []
+                break
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+            if progress_callback:
+                progress_callback(i + 1, count)
+        if not frames:
+            # 回退: 顺序均匀采样(部分编码不支持随机跳帧)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            step = max(1, total // count)
+            pos = 0
+            for i in range(count):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(pos))
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+                if progress_callback:
+                    progress_callback(i + 1, count)
+                pos += step
+    else:
+        # 视频很短: 顺序读取全部
+        for i in range(count):
+            ret, frame = cap.read()
+            if not ret:
+                log.warn("watermarkDetector", f"第 {i} 帧读取失败, 提前结束采样")
+                break
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+            if progress_callback:
+                progress_callback(i + 1, count)
+    cap.release()
+    return frames, info
+
+
 def detectStaticMask(video_path, sample_frames=30, threshold=15,
                      progress_callback=None):
     """
     时域中值法自动检测静态水印 mask
+    原理: 水印像素全片恒定; 背景随场景/运动变化。
+    采样帧均匀分布全片(不是片头 30 帧), 场景切换后只有真水印保持静止;
+    静止块超过帧面积 25% 视为静止背景并剔除(防整屏误判)。
     :param video_path: 视频路径<str>
-    :param sample_frames: 采样帧数<int>, 默认 30
+    :param sample_frames: 采样帧数<int>, 默认 30(均匀分布全片)
     :param threshold: 静止判定阈值<int>(0-255), 差异小于此值视为静止(水印)
     :param progress_callback: 进度回调(frame_index, total)
     :return: 水印 mask<np.ndarray uint8>(0/255, 与视频同尺寸), 失败返回 None
     """
     log.info("watermarkDetector", f"开始静态水印检测: {video_path} "
                                   f"(采样 {sample_frames} 帧, 阈值 {threshold})")
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        log.error("watermarkDetector", f"无法打开视频: {video_path}")
+    frames, info = _sampleFrames(video_path, sample_frames, progress_callback)
+    if info is None:
         return None
-
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     log.info("watermarkDetector",
-             f"视频信息: {w}x{h}, {fps:.2f}fps, 总帧数 {total}")
+             f"视频信息: {info['w']}x{info['h']}, {info['fps']:.2f}fps, "
+             f"总帧数 {info['total']}")
 
-    # 读取 N 帧(灰度)
-    frames = []
-    count = min(sample_frames, total) if total > 0 else sample_frames
-    for i in range(count):
-        ret, frame = cap.read()
-        if not ret:
-            log.warn("watermarkDetector", f"第 {i} 帧读取失败, 提前结束采样")
-            break
-        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-        if progress_callback:
-            progress_callback(i + 1, count)
-    cap.release()
-
-    if len(frames) < 5:
+    if not frames or len(frames) < 5:
         log.error("watermarkDetector", f"采样帧不足({len(frames)}), 无法检测")
         return None
 
@@ -75,22 +127,32 @@ def detectStaticMask(video_path, sample_frames=30, threshold=15,
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    # 面积过滤: 过小的静止区域视为噪声
+    # 面积过滤: 过小=噪声, 过大=静止背景, 均剔除
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     clean = np.zeros_like(mask)
-    min_area = mask.shape[0] * mask.shape[1] * 0.0005   # 0.05% 面积
+    frame_area = mask.shape[0] * mask.shape[1]
+    min_area = frame_area * MIN_AREA_RATIO
+    max_area = frame_area * MAX_AREA_RATIO
     kept = 0
+    kept_area = 0
     for c in contours:
         area = cv2.contourArea(c)
-        if area >= min_area:
+        if min_area <= area <= max_area:
             cv2.drawContours(clean, [c], -1, 255, -1)
             kept += 1
-    final_ratio = float(clean.mean() / 255.0)
+            kept_area += area
+    kept_ratio = kept_area / frame_area if frame_area else 0.0
+    # 静止总面积过大 → 整屏/大半屏静止(静态场景), 拒绝检测
+    if kept_ratio > MAX_TOTAL_RATIO:
+        log.warn("watermarkDetector",
+                 f"静止块总面积占比 {kept_ratio * 100:.1f}% > "
+                 f"{MAX_TOTAL_RATIO * 100:.0f}%(疑似整屏静止背景), 拒绝检测")
+        return None
     bbox = bboxFromMask(clean)
     log.info("watermarkDetector",
-             f"检测完成: 轮廓 {len(contours)} 个, 保留 {kept} 个(最小面积 "
-             f"{min_area:.0f}px), 最终水印占比 {final_ratio * 100:.2f}%, "
-             f"区域 {bbox}")
+             f"检测完成: 轮廓 {len(contours)} 个, 保留 {kept} 个"
+             f"(面积 {min_area:.0f}~{max_area:.0f}px), 最终水印占比 "
+             f"{kept_ratio * 100:.2f}%, 区域 {bbox}")
     return clean
 
 

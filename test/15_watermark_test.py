@@ -24,7 +24,7 @@ if wmDir not in sys.path:
 import gpuDetector
 from watermarkDetector import (detectStaticMask, WatermarkMasker,
                                cropTemplate, trackWatermark)
-from inpainter import Inpainter
+from inpainter import Inpainter, hasLamaModel
 from videoProcessor import prepareMasker, processVideo, removeWatermark
 
 
@@ -101,6 +101,32 @@ def main():
     assert repaired_region.mean() > 100, "修复区域不应再是纯红色水印"
     print(f"  ✓ fast 修复正常(水印区域均值 {repaired_region.mean():.0f}, "
           f"已填充背景色)")
+
+    print("[3b] 修复引擎 lama(模型存在时): 半透明水印去除 + 非水印区逐像素保留")
+    if hasLamaModel():
+        # 渐变背景(自然分布, LaMa 不幻觉) + 半透明水印
+        gx = np.linspace(0, 255, 320, dtype=np.uint8)
+        gy = np.linspace(0, 255, 240, dtype=np.uint8)
+        base = np.zeros((240, 320, 3), dtype=np.uint8)
+        for c in range(3):
+            base[:, :, c] = (gx[None, :] * 0.5 + gy[:, None] * 0.5).astype(np.uint8)
+        wm = base.copy()
+        wm[30:70, 40:120] = (wm[30:70, 40:120] * 0.45 + 255 * 0.55).astype(np.uint8)
+        lama = Inpainter(mode="lama", use_gpu="off")
+        assert lama.mode() == "lama", "应成功加载 LaMa 模型"
+        repaired = lama.inpaint(wm, m)
+        lama.close()
+        region = repaired[30:70, 40:120]
+        outside = repaired.copy()
+        outside[30:70, 40:120] = wm[30:70, 40:120]
+        diff_out = cv2.absdiff(outside, wm).mean()
+        assert diff_out == 0, f"非水印区应逐像素保留: {diff_out}"
+        assert abs(float(region.mean()) - float(base[30:70, 40:120].mean())) < 30, \
+            f"修复区应接近原始背景: {region.mean():.0f} vs {base[30:70, 40:120].mean():.0f}"
+        print(f"  ✓ lama 修复正常(修复区均值 {region.mean():.0f}, "
+              f"原始背景 {base[30:70, 40:120].mean():.0f}, 非水印区零改动)")
+    else:
+        print("  - 无 LaMa 模型, 跳过(放置 models/lama_fp32.onnx 后自动启用)")
 
     print("[4] 视频处理主流程(static)")
     out_video = os.path.join(tmp, "static_out.mp4")

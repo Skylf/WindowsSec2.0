@@ -123,11 +123,34 @@ def main():
     assert page.start_btn.isEnabled(), "完成后开始按钮应恢复"
     print(f"  ✓ 处理完成 → 输出文件存在: {out_path}")
 
-    print("[5] 取消处理")
+    print("[5] 手动指定水印区域(蒙太奇/半透明水印场景的可靠路径)")
+    small = os.path.join(tmp, "manual.mp4")
+    makeVideo(small, frames=60)
+    page.input_edit.setText(small)
+    page.output_edit.setText(os.path.join(tmp, "manual_out.mp4"))
+    page.bbox_edit.setText("200,30,280,70")
+    page.status_label.setText("")          # 清除上一步遗留状态, 防止误判
+    page.start_btn.click()
+    final_status = waitResult(app, page)
+    assert "处理完成" in final_status, f"应处理完成: {final_status}"
+    assert "手动指定水印区域" in page.result_text.toPlainText(), \
+        "结果应注明手动区域"
+    assert os.path.isfile(os.path.join(tmp, "manual_out.mp4"))
+    # 非法格式 → 应拒绝并提示, 不发起任务
+    page.bbox_edit.setText("abc,def")
+    page.start_btn.click()
+    pump(app, 0.5)
+    assert "格式应为" in page.status_label.text(), \
+        f"非法格式应提示: {page.status_label.text()}"
+    page.bbox_edit.setText("")
+    print("  ✓ 手动区域处理成功 + 非法格式校验")
+
+    print("[6] 取消处理")
     big_video = os.path.join(tmp, "big.mp4")
     makeVideo(big_video, frames=600, size=(1280, 720))
     page.input_edit.setText(big_video)
     page.output_edit.setText(os.path.join(tmp, "big_out.mp4"))
+    page.status_label.setText("")          # 清除上一步遗留状态
     page.start_btn.click()
     pump(app, 1.5)          # 留出处理时间(大视频)
     page.cancel_btn.click()

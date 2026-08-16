@@ -1487,6 +1487,7 @@ class WatermarkPage(QWidget):
     """
 
     # 下拉选项: (空间名, 显示文本, 实际值)
+    _PARSE_ERROR = object()   # bbox 解析失败哨兵
     _MODE_OPTIONS = [
         ("watermark.mode.static", "static"),
         ("watermark.mode.dynamic", "dynamic"),
@@ -1587,6 +1588,11 @@ class WatermarkPage(QWidget):
         for key, value in self._GPU_OPTIONS:
             self.gpu_combo.addItem(get_text(key), value)
 
+        # 手动水印区域(可选, 留空=自动检测)
+        self.bbox_edit = QLineEdit()
+        self.bbox_edit.setObjectName("pathEdit")
+        self.bbox_edit.setPlaceholderText(get_text("watermark.bbox.placeholder"))
+
         # 开始/取消按钮
         self.start_btn = QPushButton(get_text("watermark.btn.start"))
         self.start_btn.setObjectName("primaryBtn")
@@ -1607,6 +1613,7 @@ class WatermarkPage(QWidget):
         layout.addLayout(self._combo_row("watermark.mode", self.mode_combo))
         layout.addLayout(self._combo_row("watermark.quality", self.quality_combo))
         layout.addLayout(self._combo_row("watermark.gpu", self.gpu_combo))
+        layout.addLayout(self._bbox_row())
         layout.addStretch(1)
         btn_row = QHBoxLayout()
         btn_row.addWidget(self.start_btn)
@@ -1634,6 +1641,14 @@ class WatermarkPage(QWidget):
         row.addWidget(label)
         row.addStretch(1)
         row.addWidget(combo)
+        return row
+
+    def _bbox_row(self) -> QVBoxLayout:
+        row = QVBoxLayout()
+        label = QLabel(get_text("watermark.bbox"))
+        label.setObjectName("settingLabel")
+        row.addWidget(label)
+        row.addWidget(self.bbox_edit)
         return row
 
     # ============================================================
@@ -1664,6 +1679,10 @@ class WatermarkPage(QWidget):
                 get_text("watermark.status.fail", f"输入文件不存在: {input_path}"))
             return
         output_path = self.output_edit.text().strip().strip('"') or None
+        # 手动水印区域(可选): x1,y1,x2,y2
+        manual_bbox = self._parse_bbox()
+        if manual_bbox is self._PARSE_ERROR:
+            return   # 格式错误已提示
         if self._rsp is not None:
             self._rsp.on_watermark_start({
                 "input": input_path,
@@ -1671,9 +1690,33 @@ class WatermarkPage(QWidget):
                 "mode": self.mode_combo.currentData(),
                 "quality": self.quality_combo.currentData(),
                 "use_gpu": self.gpu_combo.currentData(),
+                "manual_bbox": manual_bbox,
             })
         else:
             self.status_label.setText(get_text("watermark.status.fail", "未绑定 UiRsp"))
+
+    def _parse_bbox(self):
+        """
+        解析手动水印区域输入 "x1,y1,x2,y2"(像素)
+        :return: (x1,y1,x2,y2) / None(留空=自动检测) / _PARSE_ERROR(格式错误)
+        """
+        text = self.bbox_edit.text().strip()
+        if not text:
+            return None
+        try:
+            parts = [int(v) for v in text.replace("（", "(").replace("）", ")")
+                     .replace("(", " ").replace(")", " ").replace(",", " ")
+                     .split()]
+            if len(parts) != 4:
+                raise ValueError("需 4 个整数")
+            x1, y1, x2, y2 = parts
+            if x1 >= x2 or y1 >= y2 or x1 < 0 or y1 < 0:
+                raise ValueError("区域无效")
+            return x1, y1, x2, y2
+        except ValueError:
+            self.status_label.setText(
+                get_text("watermark.status.fail", "水印区域格式应为 x1,y1,x2,y2(像素)"))
+            return self._PARSE_ERROR
 
     def _on_cancel_click(self):
         """[取消] → UiRsp.on_watermark_cancel"""
@@ -1725,6 +1768,7 @@ class WatermarkPage(QWidget):
         self.cancel_btn.setEnabled(busy)
         self.input_edit.setEnabled(not busy)
         self.output_edit.setEnabled(not busy)
+        self.bbox_edit.setEnabled(not busy)
 
 
 # ====================================================================

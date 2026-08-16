@@ -40,6 +40,9 @@ FreezeMoudle/freeze_config.json
 # === 视频去水印本地配置(不进 git) ===
 WatermarkMoudle/watermark_config.json
 
+# === 视频去水印模型(约 200MB, 不进 git, 见 models/README.md) ===
+WatermarkMoudle/models/*.onnx
+
 # === 缓存目录(采集的原始图片等,不进 git) ===
 cache/
 

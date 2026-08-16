@@ -43,6 +43,10 @@ def main():
     app = QApplication(sys.argv)
     print("=" * 60)
 
+    # 重置卡死配置为默认(不受先前测试/运行残留影响)
+    for k, v in freezeConfig.DEFAULT_CONFIG.items():
+        freezeConfig.set(k, v)
+
     print("[1] 装配: 中心调度 + Qt桥 + FreezeModule + UiRsp + MainWindow")
     comm = CommunicationObject()
     comm.set_main_thread_dispatcher(QtMainThreadBridge())
