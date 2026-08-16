@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QListWidget, QHBoxLayout, QVBoxLayout,
     QGridLayout, QFrame, QComboBox, QPushButton, QStackedWidget, QTabBar,
     QLineEdit, QAbstractButton, QToolTip, QPlainTextEdit,
-    QFileDialog, QProgressBar, QDialog, QSlider,
+    QFileDialog, QProgressBar, QDialog, QSlider, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, pyqtProperty, QPropertyAnimation, QEasingCurve, QPoint, pyqtSignal, QTimer, QRectF
 from PyQt6.QtGui import QKeySequence, QShortcut, QPainter, QColor, QCursor, QImage, QPixmap, QPen, QFont
@@ -1836,19 +1836,19 @@ class WatermarkPage(QWidget):
         open_row.addStretch(1)
         open_row.addWidget(self.open_btn)
 
-        # 处理日志区(合并"选择视频后点击开始处理"提示: 未开始处理时显示为占位文案)
+        # 进度条下方提示词/状态行(恢复: 空闲时提示操作, 处理中显示阶段)
+        self.status_label = QLabel(get_text("watermark.status.idle"))
+        self.status_label.setObjectName("settingValue")
+        self.status_label.setWordWrap(True)
+
+        # 处理日志与最终结果合并为一个滚动区域
         log_title = QLabel(get_text("watermark.log.title"))
         log_title.setObjectName("cardText")
-        self.log_text = QPlainTextEdit()
-        self.log_text.setObjectName("bsodResultText")   # 复用报告区样式
-        self.log_text.setReadOnly(True)
-        self.log_text.setFixedHeight(150)
-        self.log_text.setPlaceholderText(get_text("watermark.log.empty"))
-
         self.result_text = QPlainTextEdit()
         self.result_text.setObjectName("bsodResultText")   # 复用报告区样式
         self.result_text.setReadOnly(True)
-        self.result_text.setPlaceholderText(get_text("watermark.status.idle"))
+        self.result_text.setPlaceholderText(get_text("watermark.log.empty"))
+        self.log_text = self.result_text   # 兼容别名(日志与结果同一区域)
 
         layout = QVBoxLayout(card)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -1857,10 +1857,10 @@ class WatermarkPage(QWidget):
         layout.addWidget(self.progress_bar)
         layout.addSpacing(4)
         layout.addLayout(open_row)
-        layout.addSpacing(4)
+        layout.addSpacing(6)
+        layout.addWidget(self.status_label)
+        layout.addSpacing(6)
         layout.addWidget(log_title)
-        layout.addWidget(self.log_text)
-        layout.addSpacing(8)
         layout.addWidget(self.result_text, 1)
         return card
 
@@ -1910,12 +1910,14 @@ class WatermarkPage(QWidget):
         self.sound_switch.setChecked(appConfig.is_watermark_sound_enabled())
         self.sound_switch.toggled.connect(self._on_sound_toggled)
 
-        # 开始/取消按钮
+        # 开始/取消按钮(统一宽度)
         self.start_btn = QPushButton(get_text("watermark.btn.start"))
         self.start_btn.setObjectName("primaryBtn")
+        self.start_btn.setMinimumWidth(92)
         self.start_btn.clicked.connect(self._on_start_click)
         self.cancel_btn = QPushButton(get_text("watermark.btn.cancel"))
         self.cancel_btn.setObjectName("primaryBtn")
+        self.cancel_btn.setMinimumWidth(92)
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._on_cancel_click)
 
@@ -1957,9 +1959,13 @@ class WatermarkPage(QWidget):
         row = QHBoxLayout()
         label = QLabel(get_text(label_key))
         label.setObjectName("settingLabel")
+        # 下拉框占满剩余宽度, 避免选项文字截断
+        combo.setSizePolicy(QSizePolicy.Policy.Expanding,
+                            QSizePolicy.Policy.Fixed)
+        combo.setMinimumWidth(130)
         row.addWidget(label)
-        row.addStretch(1)
-        row.addWidget(combo)
+        row.addSpacing(8)
+        row.addWidget(combo, 1)
         return row
 
     def _quality_row(self) -> QVBoxLayout:
@@ -2016,12 +2022,11 @@ class WatermarkPage(QWidget):
         """[框选...] → 打开视频框选对话框, 确认后回填输入框"""
         input_path = self.input_edit.text().strip().strip('"')
         if not input_path:
-            self._append_log(get_text("watermark.log.need_input"), "fail")
+            self._fail_hint(get_text("watermark.log.need_input"))
             return
         if not os.path.isfile(input_path):
-            self._append_log(
-                get_text("watermark.log.need_input", f"输入文件不存在: {input_path}"),
-                "fail")
+            self._fail_hint(
+                get_text("watermark.log.need_input", f"输入文件不存在: {input_path}"))
             return
         dlg = WatermarkSelectDialog(input_path, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -2052,12 +2057,11 @@ class WatermarkPage(QWidget):
         """[开始处理] → UiRsp.on_watermark_start"""
         input_path = self.input_edit.text().strip().strip('"')
         if not input_path:
-            self._append_log(get_text("watermark.log.need_input"), "fail")
+            self._fail_hint(get_text("watermark.log.need_input"))
             return
         if not os.path.isfile(input_path):
-            self._append_log(
-                get_text("watermark.log.need_input", f"输入文件不存在: {input_path}"),
-                "fail")
+            self._fail_hint(
+                get_text("watermark.log.need_input", f"输入文件不存在: {input_path}"))
             return
         output_path = self.output_edit.text().strip().strip('"') or None
         # 手动水印区域(可选): x1,y1,x2,y2
@@ -2076,8 +2080,12 @@ class WatermarkPage(QWidget):
                 "manual_bbox": manual_bbox,
             })
         else:
-            self._append_log(get_text("watermark.status.fail", "未绑定 UiRsp"),
-                             "fail")
+            self._fail_hint(get_text("watermark.status.fail", "未绑定 UiRsp"))
+
+    def _fail_hint(self, msg):
+        """操作失败提示: 状态行醒目提示 + 日志区留痕"""
+        self.status_label.setText(get_text("watermark.status.fail", msg))
+        self._append_log(msg, "fail")
 
     def _log_start(self, input_path, output_path, manual_bbox):
         """启动日志: 记录本次任务的参数摘要(带阶段标签)"""
@@ -2126,8 +2134,9 @@ class WatermarkPage(QWidget):
                 return boxes[0]
             return boxes
         except ValueError:
-            self._append_log(
-                get_text("watermark.log.region_error"), "fail")
+            msg = get_text("watermark.log.region_error")
+            self.status_label.setText(get_text("watermark.status.fail", msg))
+            self._append_log(msg, "fail")
             return self._PARSE_ERROR
 
     def _on_cancel_click(self):
@@ -2161,10 +2170,12 @@ class WatermarkPage(QWidget):
         return "info"
 
     def _on_progress(self, progress_data):
-        """处理进度 → 进度条(含 ETA) + 阶段日志"""
+        """处理进度 → 进度条(含 ETA) + 状态提示 + 阶段日志"""
         percent = int(progress_data.get("percent", 0))
         info = progress_data.get("info", "")
         self.progress_bar.setValue(percent)
+        self.status_label.setText(
+            get_text("watermark.status.processing", percent, info))
         # 阶段日志: 每 10% 里程碑 或 阶段切换 时追加(避免每帧刷屏)
         stage = self._stage_of(info)
         last_stage = getattr(self, "_last_log_stage", None)
@@ -2252,12 +2263,15 @@ class WatermarkPage(QWidget):
         """处理结果 → 进度条复位 + 结果文本 + 日志 + 提示音"""
         if result_data.get("cancelled"):
             # 用户取消(与失败区分)
+            self.status_label.setText(get_text("watermark.status.cancelled"))
             self.result_text.appendPlainText(get_text("watermark.result.cancelled"))
             self._append_log(get_text("watermark.log.cancelled"), "fail")
             self._play_sound("cancel")
             self.open_btn.setVisible(False)
         elif result_data.get("success"):
             self._last_output_path = result_data.get("output_path", "")
+            self.status_label.setText(
+                get_text("watermark.status.done", result_data.get("output_path", "")))
             if result_data.get("watermark_bbox"):
                 self.result_text.appendPlainText(get_text(
                     "watermark.result.done",
@@ -2288,6 +2302,8 @@ class WatermarkPage(QWidget):
             self.open_btn.setVisible(True)
             self._play_sound("success")
         else:
+            self.status_label.setText(
+                get_text("watermark.status.fail", result_data.get("msg", "")))
             self.result_text.appendPlainText(
                 get_text("watermark.status.fail", result_data.get("msg", "")))
             self._append_log(get_text("watermark.log.fail",

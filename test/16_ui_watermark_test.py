@@ -89,6 +89,12 @@ def main():
     assert page is not None, "应存在去水印页"
     assert page.progress_bar is not None and page.result_text is not None
     assert page.start_btn.text() == "开始处理"
+    # 进度条下提示词恢复 + 日志/结果合并为同一区域
+    assert page.status_label is not None, "进度条下应有提示词"
+    assert "选择视频后点击" in page.status_label.text(), \
+        f"初始提示词应显示: {page.status_label.text()}"
+    assert page.log_text is page.result_text, "日志区与结果区应合并为同一控件"
+    assert page.open_btn.isVisible() is False, "初始打开按钮应隐藏"
     assert page.cancel_btn.text() == "取消"
     assert page.mode_combo.currentData() == "static"
     assert page.quality_combo.currentData() == "fast"
