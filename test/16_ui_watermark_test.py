@@ -110,7 +110,17 @@ def main():
         time.sleep(0.02)
     assert page.cancel_btn.isEnabled(), "处理中应可取消"
     assert page.start_btn.isEnabled() is False, "处理中开始按钮应禁用"
-    print(f"  ✓ 处理中状态正确(开始禁用/取消可用)")
+    # ETA: 处理中进度条应显示预计剩余时间(等待进度 ≥40%)
+    deadline = time.time() + 10.0
+    eta_seen = False
+    while time.time() < deadline:
+        app.processEvents()
+        if "剩余" in page.progress_bar.format():
+            eta_seen = True
+            break
+        time.sleep(0.05)
+    assert eta_seen, f"进度条应显示预计剩余时间: {page.progress_bar.format()}"
+    print(f"  ✓ 处理中状态正确 + ETA 显示: {page.progress_bar.format()}")
 
     print("[4] 等待处理结果 → 结果文本 + 输出文件")
     final_status = waitResult(app, page)
@@ -121,7 +131,12 @@ def main():
     out_path = os.path.join(tmp, "demo_nowm.mp4")
     assert os.path.isfile(out_path), "输出视频应存在"
     assert page.start_btn.isEnabled(), "完成后开始按钮应恢复"
-    print(f"  ✓ 处理完成 → 输出文件存在: {out_path}")
+    # 处理日志: 应包含开始/阶段/完成信息
+    log = page.log_text.toPlainText()
+    assert "开始处理" in log, f"日志应含开始信息: {log}"
+    assert "处理完成" in log, f"日志应含完成信息: {log}"
+    assert page.progress_bar.format() == "%p%", "完成后 ETA 应复位"
+    print(f"  ✓ 处理完成 → 输出文件存在 + 日志区正常({len(log.splitlines())} 行)")
 
     print("[5] 手动指定水印区域(蒙太奇/半透明水印场景的可靠路径)")
     small = os.path.join(tmp, "manual.mp4")
@@ -188,6 +203,7 @@ def main():
     makeVideo(big_video, frames=600, size=(1280, 720))
     page.input_edit.setText(big_video)
     page.output_edit.setText(os.path.join(tmp, "big_out.mp4"))
+    page.bbox_edit.setText("")           # 清空残留(走自动检测, 独立于前序步骤)
     page.status_label.setText("")          # 清除上一步遗留状态
     page.start_btn.click()
     pump(app, 1.5)          # 留出处理时间(大视频)

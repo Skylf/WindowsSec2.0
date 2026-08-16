@@ -31,7 +31,9 @@ lateCodedTime:20260815
 #   win.show()
 
 import os
+import re
 import sys
+import time
 
 # 注入 UI 目录(本文件位于 <项目根>/UI/FaceModuleUI/)
 _UI_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1829,6 +1831,15 @@ class WatermarkPage(QWidget):
         self.status_label.setObjectName("settingValue")
         self.status_label.setWordWrap(True)
 
+        # 处理日志区(实时展示当前阶段, 供用户了解正在做什么)
+        log_title = QLabel(get_text("watermark.log.title"))
+        log_title.setObjectName("cardText")
+        self.log_text = QPlainTextEdit()
+        self.log_text.setObjectName("bsodResultText")   # 复用报告区样式
+        self.log_text.setReadOnly(True)
+        self.log_text.setFixedHeight(150)
+        self.log_text.setPlaceholderText(get_text("watermark.log.empty"))
+
         self.result_text = QPlainTextEdit()
         self.result_text.setObjectName("bsodResultText")   # 复用报告区样式
         self.result_text.setReadOnly(True)
@@ -1841,7 +1852,10 @@ class WatermarkPage(QWidget):
         layout.addWidget(self.progress_bar)
         layout.addSpacing(8)
         layout.addWidget(self.status_label)
-        layout.addSpacing(10)
+        layout.addSpacing(8)
+        layout.addWidget(log_title)
+        layout.addWidget(self.log_text)
+        layout.addSpacing(8)
         layout.addWidget(self.result_text, 1)
         return card
 
@@ -1998,6 +2012,7 @@ class WatermarkPage(QWidget):
         if manual_bbox is self._PARSE_ERROR:
             return   # 格式错误已提示
         if self._rsp is not None:
+            self._log_start(input_path, output_path, manual_bbox)
             self._rsp.on_watermark_start({
                 "input": input_path,
                 "output": output_path,
@@ -2008,6 +2023,25 @@ class WatermarkPage(QWidget):
             })
         else:
             self.status_label.setText(get_text("watermark.status.fail", "未绑定 UiRsp"))
+
+    def _log_start(self, input_path, output_path, manual_bbox):
+        """启动日志: 记录本次任务的参数摘要"""
+        mode = self.mode_combo.currentData()
+        quality = self.quality_combo.currentData()
+        gpu = self.gpu_combo.currentData()
+        self.log_text.clear()
+        self.result_text.clear()
+        if isinstance(manual_bbox, (tuple, list)) and len(manual_bbox) == 4 \
+                and all(isinstance(v, int) for v in manual_bbox):
+            region = f"手动区域 {manual_bbox}"
+        elif isinstance(manual_bbox, list):
+            region = f"手动区域 {len(manual_bbox)} 块"
+        else:
+            region = "自动检测"
+        self._append_log(get_text("watermark.log.start",
+                                  os.path.basename(input_path),
+                                  quality, gpu, region, mode))
+        self._append_log(get_text("watermark.log.output", output_path or "自动生成"))
 
     def _parse_bbox(self):
         """
@@ -2049,19 +2083,63 @@ class WatermarkPage(QWidget):
     # 结果联动(连接主窗口信号, 主线程执行)
     # ============================================================
     def _on_progress(self, progress_data):
-        """处理进度 → 进度条 + 状态"""
+        """处理进度 → 进度条(含 ETA) + 状态 + 阶段日志"""
         percent = int(progress_data.get("percent", 0))
         info = progress_data.get("info", "")
         self.progress_bar.setValue(percent)
         self.status_label.setText(
             get_text("watermark.status.processing", percent, info))
+        # 阶段日志: 每 10% 或 info 变化时追加(避免每帧刷屏)
+        if percent != getattr(self, "_last_log_pct", -1) \
+                and (percent % 10 == 0 or percent >= 100):
+            self._last_log_pct = percent
+            self._append_log(info)
+        # ETA 测算
+        self._update_eta(percent, info)
+
+    def _update_eta(self, percent, info):
+        """根据已耗时与进度测算预计剩余时间, 显示在进度条"""
+        start = getattr(self, "_process_start", None)
+        if start is None:
+            return
+        elapsed = time.time() - start
+        m = re.match(r"处理中 (\d+)/(\d+)", info)
+        if m:
+            done, total = int(m.group(1)), int(m.group(2))
+            if done > 0:
+                eta = elapsed / done * (total - done)
+                self.progress_bar.setFormat(
+                    f"%p% · {get_text('watermark.eta', self._fmt_eta(eta))}")
+        elif percent > 5:
+            # 检测/加载阶段: 按百分比粗估
+            eta = elapsed / percent * (100 - percent)
+            self.progress_bar.setFormat(
+                f"%p% · {get_text('watermark.eta', self._fmt_eta(eta))}")
+
+    @staticmethod
+    def _fmt_eta(seconds):
+        """秒数 → "X分Y秒"(不足 1 分钟显示秒)"""
+        seconds = max(0, int(seconds))
+        m, s = divmod(seconds, 60)
+        if m <= 0:
+            return f"{s}秒"
+        if m >= 60:
+            h, m = divmod(m, 60)
+            return f"{h}小时{m}分"
+        return f"{m}分{s}秒"
+
+    def _append_log(self, text):
+        """追加一行带时间戳的处理日志"""
+        ts = time.strftime("%H:%M:%S", time.localtime())
+        self.log_text.appendPlainText(f"[{ts}] {text}")
 
     def _on_result(self, result_data):
-        """处理结果 → 进度条复位 + 结果文本"""
+        """处理结果 → 进度条复位 + 结果文本 + 日志"""
         if result_data.get("cancelled"):
             # 用户取消(与失败区分)
             self.status_label.setText(get_text("watermark.status.cancelled"))
             self.result_text.appendPlainText(get_text("watermark.result.cancelled"))
+            self._append_log(get_text("watermark.log.cancelled"))
         elif result_data.get("success"):
             self.status_label.setText(
                 get_text("watermark.status.done", result_data.get("output_path", "")))
@@ -2076,21 +2154,37 @@ class WatermarkPage(QWidget):
             else:
                 self.result_text.appendPlainText(
                     get_text("watermark.result.none"))
+            elapsed = result_data.get("elapsed_s")
+            self._append_log(get_text(
+                "watermark.log.done",
+                result_data.get("output_path", ""),
+                self._fmt_eta(elapsed) if elapsed else "?"))
+            # 去不干净排查提示
+            if result_data.get("mode") == "fast":
+                self._append_log(get_text("watermark.log.hint_fast"))
+            if str(result_data.get("note", "")).startswith("手动"):
+                self._append_log(get_text("watermark.log.hint_residue"))
         else:
             self.status_label.setText(
                 get_text("watermark.status.fail", result_data.get("msg", "")))
             self.result_text.appendPlainText(
                 get_text("watermark.status.fail", result_data.get("msg", "")))
+            self._append_log(get_text("watermark.log.fail",
+                                      result_data.get("msg", "")))
         self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
 
     def _on_busy(self, busy_data):
-        """处理状态变化 → 按钮使能"""
+        """处理状态变化 → 按钮使能 + 计时"""
         busy = bool(busy_data.get("busy", False))
         self.start_btn.setEnabled(not busy)
         self.cancel_btn.setEnabled(busy)
         self.input_edit.setEnabled(not busy)
         self.output_edit.setEnabled(not busy)
         self.bbox_edit.setEnabled(not busy)
+        if busy:
+            self._process_start = time.time()
+            self._last_log_pct = -1
 
 
 # ====================================================================
