@@ -238,6 +238,31 @@ def main():
     print(f"  ✓ 处理完成: {result['msg']}, 平均帧耗时 {result['avg_ms']}ms, "
           f"水印区域修复后均值 {region_mean:.0f}")
 
+    print("[4b] 手动多区域: 并集 mask + 逐框细化")
+    multi_video = os.path.join(tmp, "multi.mp4")
+    boxes = [(232, 20, 312, 70), (10, 180, 90, 230)]   # 右上 + 左下两处水印
+    writer = cv2.VideoWriter(multi_video, cv2.VideoWriter_fourcc(*'mp4v'),
+                             25.0, (320, 240))
+    for _ in range(40):
+        frame = np.random.randint(0, 255, (240, 320, 3), dtype=np.uint8)
+        for (bx1, by1, bx2, by2) in boxes:
+            frame[by1:by2, bx1:bx2] = (200, 30, 30)
+        writer.write(frame)
+    writer.release()
+    out_multi = os.path.join(tmp, "multi_out.mp4")
+    result = removeWatermark(multi_video, out_multi, mode="static",
+                             manual_bbox=boxes, quality="fast")
+    assert result["success"], f"多区域处理失败: {result}"
+    assert "2 块" in result["note"], f"说明应含 2 块: {result['note']}"
+    cap = cv2.VideoCapture(out_multi)
+    ret, mframe = cap.read()
+    cap.release()
+    assert ret
+    for (bx1, by1, bx2, by2) in boxes:
+        assert mframe[by1:by2, bx1:bx2].mean() > 100, \
+            f"水印区域 {boxes} 应被修复"
+    print(f"  ✓ 多区域处理完成: {result['note']}")
+
     print("[5] 动态水印: 模板匹配跟踪")
     moving_video = os.path.join(tmp, "moving.mp4")
     real_last = makeTestVideo(moving_video, frames=20, moving=True)

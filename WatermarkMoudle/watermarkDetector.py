@@ -277,16 +277,19 @@ def detectTransparentMask(video_path, sample_frames=30, variance_ratio=0.75,
 # ====================================================================
 def refineMaskFromVideo(video_path, bbox, sample_frames=20,
                         variance_ratio=0.75, noise_floor=4.0,
-                        progress_callback=None):
+                        median_threshold=15, progress_callback=None):
     """
-    手动框内水印 mask 细化(方差法)
-    用户圈定一个宽松区域后, 用时域方差把 mask 收紧到真正的水印像素
-    (文字笔画/图形本体), 只修复这些像素, 周边背景保持原样 → 修复痕迹更小。
+    手动框内水印 mask 细化(方差法 + 中值法)
+    用户圈定一个宽松区域后, 把 mask 收紧到真正的水印像素本体:
+      - 半透明水印: 时域方差介于背景与噪声之间(方差法)
+      - 不透明水印/静止图形: 与中值帧差异小(中值法)
+    只修复这些像素, 周边背景保持原样 → 修复痕迹更小。
     :param video_path: 视频路径<str>
     :param bbox: 手动圈定区域 (x1,y1,x2,y2)
     :param sample_frames: 采样帧数<int>
     :param variance_ratio: 方差比阈值<float>
     :param noise_floor: 噪声底<float>
+    :param median_threshold: 静止判定阈值<int>(0-255)
     :param progress_callback: 进度回调(i, total)
     :return: 细化后的 mask<np.ndarray uint8> 或 None(细化失败, 回退矩形)
     """
@@ -294,7 +297,8 @@ def refineMaskFromVideo(video_path, bbox, sample_frames=20,
     if x2 <= x1 or y2 <= y1:
         return None
     log.info("watermarkDetector",
-             f"手动框细化: 区域 {bbox}(方差比 {variance_ratio}, 噪声底 {noise_floor})")
+             f"手动框细化: 区域 {bbox}(方差比 {variance_ratio}, "
+             f"噪声底 {noise_floor}, 中值阈值 {median_threshold})")
     frames, info = _sampleFrames(video_path, sample_frames, progress_callback)
     if info is None or not frames or len(frames) < 5:
         return None
@@ -305,12 +309,18 @@ def refineMaskFromVideo(video_path, bbox, sample_frames=20,
     ax2, ay2 = min(w, x2 + m), min(h, y2 + m)
 
     stack = np.stack(frames).astype(np.float32)
+    # ── 半透明水印: 方差候选(介于背景与噪声之间) ──
     std = np.std(stack, axis=0)
     zone = std[ay1:ay2, ax1:ax2]
     k = max(15, min(zone.shape) // 24) | 1
     kernel = np.ones((k, k), dtype=np.float32) / (k * k)
     local_bg = cv2.filter2D(zone, -1, kernel, borderType=cv2.BORDER_REFLECT)
-    cand = (zone > noise_floor) & (zone < local_bg * variance_ratio)
+    cand_var = (zone > noise_floor) & (zone < local_bg * variance_ratio)
+    # ── 不透明水印/静止图形: 与中值帧差异小(静止像素) ──
+    median = np.median(stack, axis=0).astype(np.uint8)
+    diff = cv2.absdiff(frames[0], median)
+    cand_med = diff[ay1:ay2, ax1:ax2] < median_threshold
+    cand = cand_var | cand_med
     mask = np.zeros((h, w), dtype=np.uint8)
     mask[ay1:ay2, ax1:ax2][cand] = 255
     # 只保留落在用户框内的候选(外扩区仅用于方差估计)

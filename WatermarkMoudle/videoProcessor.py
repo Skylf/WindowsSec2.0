@@ -10,6 +10,7 @@ import os
 import time
 
 import cv2
+import numpy as np
 
 import log
 import watermarkConfig
@@ -17,6 +18,23 @@ from watermarkDetector import (detectWatermarkMask, refineMaskFromVideo,
                                WatermarkMasker, cropTemplate, bboxFromMask,
                                trackWatermark)
 from inpainter import Inpainter
+
+
+def normalizeBoxes(manual_bbox):
+    """
+    归一化手动区域为矩形列表(支持单个/多个)
+    :param manual_bbox: (x1,y1,x2,y2) 或 [(x1,y1,x2,y2), ...]
+    :return: 矩形列表<list<tuple>>
+    """
+    if manual_bbox is None:
+        return []
+    if isinstance(manual_bbox, (tuple, list)) and len(manual_bbox) == 4 \
+            and all(isinstance(v, (int, float)) for v in manual_bbox):
+        return [tuple(int(v) for v in manual_bbox)]
+    boxes = []
+    for b in manual_bbox:
+        boxes.append(tuple(int(v) for v in b))
+    return boxes
 
 
 def buildOutputPath(input_path, output_dir=None, suffix=None):
@@ -84,27 +102,47 @@ def prepareMasker(video_path, mode="static", manual_bbox=None,
              f"视频信息: {w}x{h}, {fps:.2f}fps, 总帧数 {total}, "
              f"模式 {mode}, 手动区域 {manual_bbox}")
 
-    # 手动指定水印区域
+    # 手动指定水印区域(支持单个/多个矩形)
     if manual_bbox is not None:
-        # 框内自动细化: 方差法收紧到水印像素本体(文字笔画等),
-        # 只修复这些像素, 周边背景保持原样 → 修复痕迹更小
+        boxes = normalizeBoxes(manual_bbox)
+        if not boxes:
+            raise IOError("手动水印区域为空")
+        # 逐框细化(方差法收紧到水印像素本体), 并集生成 mask
         if progress_callback:
-            progress_callback(8, "细化水印区域(方差法)...")
-        refined = refineMaskFromVideo(
-            video_path, manual_bbox,
-            sample_frames=int(watermarkConfig.get("median_frames")),
-            variance_ratio=float(watermarkConfig.get("variance_ratio")),
-            noise_floor=float(watermarkConfig.get("noise_floor")))
-        if refined is not None:
-            masker = WatermarkMasker(mode="static", mask=refined)
+            progress_callback(8, f"细化水印区域(方差法, {len(boxes)} 块)...")
+        union_mask = np.zeros(first_frame.shape[:2], dtype=np.uint8)
+        refined_boxes = []
+        refined_count = 0
+        for i, box in enumerate(boxes):
+            refined = refineMaskFromVideo(
+                video_path, box,
+                sample_frames=int(watermarkConfig.get("median_frames")),
+                variance_ratio=float(watermarkConfig.get("variance_ratio")),
+                noise_floor=float(watermarkConfig.get("noise_floor")),
+                median_threshold=int(watermarkConfig.get("median_threshold")))
+            if refined is not None:
+                union_mask = cv2.bitwise_or(union_mask, refined)
+                refined_boxes.append(bboxFromMask(refined))
+                refined_count += 1
+                log.info("videoProcessor",
+                         f"框 {i + 1} 细化成功: {bboxFromMask(refined)}")
+            else:
+                x1, y1, x2, y2 = box
+                union_mask[y1:y2, x1:x2] = 255
+                refined_boxes.append(box)
+                log.warn("videoProcessor",
+                         f"框 {i + 1} 细化失败, 回退矩形: {box}")
+        if union_mask.any():
+            masker = WatermarkMasker(mode="static", mask=union_mask)
+            note = (f"手动指定水印区域({len(boxes)} 块, "
+                    f"{refined_count} 块已细化)")
             log.info("videoProcessor",
-                     f"手动区域细化成功: {bboxFromMask(refined)}")
-            return masker, bboxFromMask(refined), \
-                f"手动指定水印区域(已细化 {bboxFromMask(refined)})"
-        masker = WatermarkMasker(mode="static", bbox=manual_bbox,
+                     f"手动区域并集: {bboxFromMask(union_mask)}, {note}")
+            return masker, bboxFromMask(union_mask), note
+        masker = WatermarkMasker(mode="static", bbox=boxes[0],
                                  frame_shape=first_frame.shape)
-        log.info("videoProcessor", f"手动指定水印区域: {manual_bbox}, 跳过自动检测")
-        return masker, tuple(int(v) for v in manual_bbox), "手动指定水印区域"
+        log.info("videoProcessor", f"手动指定水印区域: {boxes[0]}")
+        return masker, boxes[0], "手动指定水印区域"
 
     # 自动检测(组合: 中值法+方差法, 覆盖不透明/半透明水印)
     if progress_callback:
@@ -260,7 +298,8 @@ def removeWatermark(input_path, output_path=None, mode="static",
     :param input_path: 输入视频路径<str>
     :param output_path: None=自动 / 目录路径=目录内自动命名 / 文件路径=直接用
     :param mode: "static"/"dynamic"
-    :param manual_bbox: 手动水印区域 (x1,y1,x2,y2), None=自动检测
+    :param manual_bbox: 手动水印区域 (x1,y1,x2,y2) 或矩形列表(多选),
+                        None=自动检测
     :param quality: "fast"/"lama", None=配置
     :param use_gpu: "auto"/"on"/"off", None=配置
     :param progress_callback: 进度回调(percent, info)

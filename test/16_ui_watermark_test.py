@@ -145,6 +145,44 @@ def main():
     page.bbox_edit.setText("")
     print("  ✓ 手动区域处理成功 + 非法格式校验")
 
+    print("[5b] 手动多区域(分号分隔, 并集 mask)")
+    page.output_edit.setText(os.path.join(tmp, "manual_multi.mp4"))
+    page.bbox_edit.setText("200,30,280,70;20,150,90,200")
+    page.status_label.setText("")
+    page.start_btn.click()
+    final_status = waitResult(app, page)
+    assert "处理完成" in final_status, f"应处理完成: {final_status}"
+    assert "2 块" in page.result_text.toPlainText(), \
+        f"结果应注明 2 块: {page.result_text.toPlainText()}"
+    assert os.path.isfile(os.path.join(tmp, "manual_multi.mp4"))
+    print("  ✓ 多区域处理成功(2 块并集)")
+
+    print("[5c] 框选对话框: 视频加载 + 模拟框选 + 回填")
+    from UI import WatermarkSelectDialog
+    dlg = WatermarkSelectDialog(small, win)
+    pump(app, 0.5)
+    assert dlg._frame is not None, "对话框应加载视频帧"
+    assert dlg.slider.maximum() >= 59, "进度条范围应为总帧数"
+    # 模拟拖拽框选(1 个)
+    dlg.begin_drag(10, 10)
+    dlg.update_drag(100, 80)
+    dlg.end_drag()
+    assert len(dlg.rects()) == 1, "应记录 1 个框选区域"
+    # 撤销
+    dlg._undo_rect()
+    assert len(dlg.rects()) == 0, "撤销后应为 0"
+    # 框选 2 个
+    dlg.begin_drag(10, 10); dlg.update_drag(60, 60); dlg.end_drag()
+    dlg.begin_drag(200, 100); dlg.update_drag(300, 180); dlg.end_drag()
+    assert len(dlg.rects()) == 2, "应支持多选"
+    assert dlg.rectsText() == "10,10,60,60; 200,100,300,180", \
+        f"回填文本错误: {dlg.rectsText()}"
+    # 模拟确认 → 回填到主页面
+    page.bbox_edit.setText(dlg.rectsText())
+    assert "10,10,60,60" in page.bbox_edit.text()
+    dlg.close()
+    print("  ✓ 框选对话框: 加载/拖拽/多选/撤销/回填正常")
+
     print("[6] 取消处理")
     big_video = os.path.join(tmp, "big.mp4")
     makeVideo(big_video, frames=600, size=(1280, 720))

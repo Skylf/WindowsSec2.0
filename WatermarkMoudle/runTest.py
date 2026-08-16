@@ -151,6 +151,21 @@ def editConfig():
     print("配置已保存:", watermarkConfig.config_path())
 
 
+def _parseBboxArg(s):
+    """
+    解析 --bbox 参数: "x1,y1,x2,y2" 或 "x1,y1,x2,y2;x1,y1,x2,y2"(多块)
+    :return: 单个 (x1,y1,x2,y2) 或列表(多块)
+    """
+    nums = [int(v) for v in s.replace("(", " ").replace(")", " ")
+            .replace(",", " ").replace(";", " ").split()]
+    if not nums or len(nums) % 4 != 0:
+        raise argparse.ArgumentTypeError("bbox 需为 4 的倍数个整数, 如 "
+                                         "1450,0,1920,150 或 "
+                                         "1450,0,1920,150;50,50,200,200")
+    boxes = [tuple(nums[i:i + 4]) for i in range(0, len(nums), 4)]
+    return boxes[0] if len(boxes) == 1 else boxes
+
+
 def main():
     parser = argparse.ArgumentParser(description="视频水印去除(本地离线)")
     parser.add_argument("--once", metavar="视频路径", help="一键处理模式")
@@ -161,9 +176,8 @@ def main():
     parser.add_argument("--gpu", choices=["auto", "on", "off"], default=None,
                         help="GPU 开关(默认取配置)")
     parser.add_argument("--output", help="输出文件路径或输出文件夹(默认输入同目录加后缀)")
-    parser.add_argument("--bbox", type=lambda s: tuple(int(v) for v in
-                        s.replace("(", "").replace(")", "").split(",")),
-                        help="手动水印区域 x1,y1,x2,y2(跳过自动检测)")
+    parser.add_argument("--bbox", type=_parseBboxArg,
+                        help="手动水印区域 x1,y1,x2,y2(像素, 多个用分号分隔, 跳过自动检测)")
     parser.add_argument("--debug", action="store_true",
                         help="输出 DEBUG 级详细日志(模板匹配得分/逐帧跟踪等)")
     args = parser.parse_args()

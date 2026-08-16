@@ -47,7 +47,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QListWidget, QHBoxLayout, QVBoxLayout,
     QGridLayout, QFrame, QComboBox, QPushButton, QStackedWidget, QTabBar,
     QLineEdit, QAbstractButton, QToolTip, QPlainTextEdit,
-    QFileDialog, QProgressBar,
+    QFileDialog, QProgressBar, QDialog, QSlider,
 )
 from PyQt6.QtCore import Qt, pyqtProperty, QPropertyAnimation, QEasingCurve, QPoint, pyqtSignal, QTimer, QRectF
 from PyQt6.QtGui import QKeySequence, QShortcut, QPainter, QColor, QCursor, QImage, QPixmap, QPen, QFont
@@ -1474,6 +1474,294 @@ class FreezePage(QWidget):
 
 
 # ====================================================================
+# WatermarkSelectDialog: 手动框选水印对话框(视频预览 + 矩形多选)
+# ====================================================================
+class WatermarkSelectDialog(QDialog):
+    """
+    手动框选水印对话框
+    ==================
+    加载视频流: 播放/暂停 + 进度条定位; 在画面上按住鼠标左键拖拽
+    框选水印(支持多选), 已选区域以绿色框+编号显示。
+    确认后通过 rects() 返回矩形列表。
+    """
+
+    class _Canvas(QLabel):
+        """视频画布: 捕获鼠标拖拽事件转发给对话框"""
+
+        def __init__(self, owner):
+            super().__init__()
+            self._owner = owner
+            self.setMouseTracking(True)
+            self.setMinimumSize(860, 460)
+            self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.setStyleSheet("background-color: #0B1120;")
+
+        def _to_img(self, pos):
+            """鼠标位置 → 图像像素坐标(考虑缩放与居中偏移)"""
+            return self._owner.mapToImage(pos.x(), pos.y())
+
+        def mousePressEvent(self, event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                x, y = self._to_img(event.position())
+                if x is not None:
+                    self._owner.begin_drag(x, y)
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event):
+            if self._owner.is_dragging():
+                x, y = self._to_img(event.position())
+                if x is not None:
+                    self._owner.update_drag(x, y)
+            super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event):
+            if event.button() == Qt.MouseButton.LeftButton \
+                    and self._owner.is_dragging():
+                self._owner.end_drag()
+            super().mouseReleaseEvent(event)
+
+    def __init__(self, video_path, parent=None):
+        super().__init__(parent)
+        self._video_path = video_path
+        self._cap = cv2.VideoCapture(video_path)
+        self._total = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self._fps = self._cap.get(cv2.CAP_PROP_FPS) or 25.0
+        self._pos = 0
+        self._frame = None          # 当前 BGR 帧
+        self._rects = []            # [(x1,y1,x2,y2), ...] 已选区域
+        self._drag = None           # (x1,y1,x2,y2) 拖拽中
+        self._playing = False
+        self._disp_offset = (0, 0)  # 显示区内图像偏移(居中)
+        self._disp_scale = 1.0      # 图像 → 显示缩放
+
+        self.setWindowTitle(get_text("watermark.select.title"))
+        self.resize(960, 680)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(max(20, int(1000 / max(1.0, self._fps))))
+        self._timer.timeout.connect(self._next_frame)
+
+        self._build_ui()
+        if self._cap.isOpened():
+            self._seek(0)
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # 提示文字
+        hint = QLabel(get_text("watermark.select.hint"))
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        # 视频画布
+        self._canvas = self._Canvas(self)
+        layout.addWidget(self._canvas, 1)
+
+        # 控制行: 播放/暂停 + 进度条 + 帧位置
+        ctrl = QHBoxLayout()
+        self.play_btn = QPushButton(get_text("watermark.select.play"))
+        self.play_btn.setObjectName("primaryBtn")
+        self.play_btn.clicked.connect(self._toggle_play)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, max(0, self._total - 1))
+        self.slider.sliderReleased.connect(self._on_slider_release)
+        self.frame_label = QLabel("")
+        self.frame_label.setObjectName("settingValue")
+        ctrl.addWidget(self.play_btn)
+        ctrl.addWidget(self.slider, 1)
+        ctrl.addWidget(self.frame_label)
+        layout.addLayout(ctrl)
+
+        # 已选区域列表
+        self.rects_label = QLabel(get_text("watermark.select.empty_rects"))
+        self.rects_label.setObjectName("settingValue")
+        self.rects_label.setWordWrap(True)
+        layout.addWidget(self.rects_label)
+
+        # 操作按钮
+        btns = QHBoxLayout()
+        undo_btn = QPushButton(get_text("watermark.select.undo"))
+        undo_btn.clicked.connect(self._undo_rect)
+        clear_btn = QPushButton(get_text("watermark.select.clear"))
+        clear_btn.clicked.connect(self._clear_rects)
+        btns.addWidget(undo_btn)
+        btns.addWidget(clear_btn)
+        btns.addStretch(1)
+        cancel_btn = QPushButton(get_text("watermark.select.cancel"))
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn = QPushButton(get_text("watermark.select.confirm"))
+        ok_btn.setObjectName("primaryBtn")
+        ok_btn.clicked.connect(self.accept)
+        btns.addWidget(cancel_btn)
+        btns.addWidget(ok_btn)
+        layout.addLayout(btns)
+
+    # ============================================================
+    # 视频流控制
+    # ============================================================
+    def _read_at(self, pos):
+        """读取指定帧(BGR), 失败返回 None"""
+        if self._cap is None or not self._cap.isOpened():
+            return None
+        self._cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(pos)))
+        ret, frame = self._cap.read()
+        return frame if ret else None
+
+    def _seek(self, pos):
+        """定位到指定帧并显示"""
+        if self._cap is None or not self._cap.isOpened():
+            return
+        frame = self._read_at(pos)
+        if frame is None:
+            return
+        self._pos = max(0, min(int(pos), self._total - 1))
+        self._frame = frame
+        self._render()
+        self.slider.blockSignals(True)
+        self.slider.setValue(self._pos)
+        self.slider.blockSignals(False)
+        self.frame_label.setText(
+            get_text("watermark.select.frame", self._pos + 1, self._total))
+
+    def _next_frame(self):
+        """顺序播放下一帧(顺序读取快, 无 seek 开销)"""
+        if self._cap is None or not self._cap.isOpened():
+            return
+        ret, frame = self._cap.read()
+        if not ret:
+            self._toggle_play()   # 播完自动暂停
+            return
+        self._pos = int(self._cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+        self._frame = frame
+        self._render()
+        self.slider.blockSignals(True)
+        self.slider.setValue(self._pos)
+        self.slider.blockSignals(False)
+        self.frame_label.setText(
+            get_text("watermark.select.frame", self._pos + 1, self._total))
+
+    def _toggle_play(self):
+        if self._playing:
+            self._timer.stop()
+            self._playing = False
+            self.play_btn.setText(get_text("watermark.select.play"))
+        else:
+            if self._pos >= self._total - 1:
+                self._seek(0)   # 播完重播
+            self._timer.start()
+            self._playing = True
+            self.play_btn.setText(get_text("watermark.select.pause"))
+
+    def _on_slider_release(self):
+        self._seek(self.slider.value())
+
+    # ============================================================
+    # 矩形框选
+    # ============================================================
+    def mapToImage(self, disp_x, disp_y):
+        """显示坐标 → 图像像素坐标(缩放/居中换算)"""
+        ox, oy = self._disp_offset
+        ix = int((disp_x - ox) / self._disp_scale)
+        iy = int((disp_y - oy) / self._disp_scale)
+        if self._frame is None:
+            return None, None
+        h, w = self._frame.shape[:2]
+        if ix < 0 or iy < 0 or ix >= w or iy >= h:
+            return None, None
+        return ix, iy
+
+    def begin_drag(self, x, y):
+        self._drag = (x, y, x, y)
+        self._render()
+
+    def update_drag(self, x, y):
+        if self._drag is None:
+            return
+        x1, y1, _, _ = self._drag
+        self._drag = (min(x1, x), min(y1, y), max(x1, x), max(y1, y))
+        self._render()
+
+    def end_drag(self):
+        if self._drag is None:
+            return
+        x1, y1, x2, y2 = self._drag
+        self._drag = None
+        if x2 - x1 >= 8 and y2 - y1 >= 8:
+            self._rects.append((x1, y1, x2, y2))
+        self._render()
+
+    def is_dragging(self):
+        return self._drag is not None
+
+    def _undo_rect(self):
+        if self._rects:
+            self._rects.pop()
+            self._render()
+
+    def _clear_rects(self):
+        self._rects = []
+        self._render()
+
+    # ============================================================
+    # 渲染
+    # ============================================================
+    def _render(self):
+        if self._frame is None:
+            return
+        img = self._frame.copy()
+        # 已选区域: 绿色框 + 编号
+        for i, (x1, y1, x2, y2) in enumerate(self._rects):
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(img, str(i + 1), (x1, max(18, y1 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        # 拖拽中: 红色框
+        if self._drag is not None:
+            x1, y1, x2, y2 = self._drag
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        # 已选区域文字
+        if self._rects:
+            desc = "; ".join(f"{i + 1}:({x1},{y1},{x2},{y2})"
+                             for i, (x1, y1, x2, y2) in enumerate(self._rects))
+            self.rects_label.setText(
+                get_text("watermark.select.rects", len(self._rects), desc))
+        else:
+            self.rects_label.setText(get_text("watermark.select.empty_rects"))
+
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0],
+                      QImage.Format.Format_RGB888).copy()
+        pix = QPixmap.fromImage(qimg)
+        # 缩放到画布(保持宽高比, 居中)
+        canvas_size = self._canvas.size()
+        scaled = pix.scaled(canvas_size,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation)
+        self._disp_scale = scaled.width() / pix.width() if pix.width() else 1.0
+        self._disp_offset = ((canvas_size.width() - scaled.width()) / 2,
+                             (canvas_size.height() - scaled.height()) / 2)
+        self._canvas.setPixmap(scaled)
+
+    # ============================================================
+    # 结果
+    # ============================================================
+    def rects(self):
+        """已选矩形列表 [(x1,y1,x2,y2), ...]"""
+        return list(self._rects)
+
+    def rectsText(self):
+        """已选矩形文本 "x1,y1,x2,y2;x1,y1,x2,y2"(供回填输入框)"""
+        return "; ".join(f"{x1},{y1},{x2},{y2}" for x1, y1, x2, y2 in self._rects)
+
+    def closeEvent(self, event):
+        self._timer.stop()
+        if self._cap is not None:
+            self._cap.release()
+        super().closeEvent(event)
+
+
+# ====================================================================
 # WatermarkPage: 视频去水印页(接入真实处理)
 # ====================================================================
 class WatermarkPage(QWidget):
@@ -1645,11 +1933,37 @@ class WatermarkPage(QWidget):
 
     def _bbox_row(self) -> QVBoxLayout:
         row = QVBoxLayout()
+        head = QHBoxLayout()
         label = QLabel(get_text("watermark.bbox"))
         label.setObjectName("settingLabel")
-        row.addWidget(label)
+        select_btn = QPushButton(get_text("watermark.bbox.select"))
+        select_btn.setObjectName("primaryBtn")
+        select_btn.clicked.connect(self._on_select_click)
+        head.addWidget(label)
+        head.addStretch(1)
+        head.addWidget(select_btn)
+        row.addLayout(head)
         row.addWidget(self.bbox_edit)
         return row
+
+    def _on_select_click(self):
+        """[框选...] → 打开视频框选对话框, 确认后回填输入框"""
+        input_path = self.input_edit.text().strip().strip('"')
+        if not input_path:
+            self.status_label.setText(
+                get_text("watermark.status.fail", "请先选择输入视频"))
+            return
+        if not os.path.isfile(input_path):
+            self.status_label.setText(
+                get_text("watermark.status.fail", f"输入文件不存在: {input_path}"))
+            return
+        dlg = WatermarkSelectDialog(input_path, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            text = dlg.rectsText()
+            if text:
+                self.bbox_edit.setText(text)
+                self.status_label.setText(
+                    get_text("watermark.status.select_done", dlg.rects().__len__()))
 
     # ============================================================
     # 交互(经 UiRsp → 中心调度 → WatermarkModule)
@@ -1697,25 +2011,33 @@ class WatermarkPage(QWidget):
 
     def _parse_bbox(self):
         """
-        解析手动水印区域输入 "x1,y1,x2,y2"(像素)
-        :return: (x1,y1,x2,y2) / None(留空=自动检测) / _PARSE_ERROR(格式错误)
+        解析手动水印区域输入, 支持多矩形:
+          "x1,y1,x2,y2" 或 "x1,y1,x2,y2;x1,y1,x2,y2"(分号/空格分隔)
+        :return: (x1,y1,x2,y2) / [(x1,y1,x2,y2), ...] / None(留空=自动检测)
+                 / _PARSE_ERROR(格式错误)
         """
         text = self.bbox_edit.text().strip()
         if not text:
             return None
         try:
-            parts = [int(v) for v in text.replace("（", "(").replace("）", ")")
-                     .replace("(", " ").replace(")", " ").replace(",", " ")
-                     .split()]
-            if len(parts) != 4:
-                raise ValueError("需 4 个整数")
-            x1, y1, x2, y2 = parts
-            if x1 >= x2 or y1 >= y2 or x1 < 0 or y1 < 0:
-                raise ValueError("区域无效")
-            return x1, y1, x2, y2
+            nums = [int(v) for v in text.replace("（", "(").replace("）", ")")
+                    .replace("(", " ").replace(")", " ")
+                    .replace(",", " ").replace(";", " ").split()]
+            if not nums or len(nums) % 4 != 0:
+                raise ValueError("需 4 的倍数个整数")
+            boxes = []
+            for i in range(0, len(nums), 4):
+                x1, y1, x2, y2 = nums[i:i + 4]
+                if x1 >= x2 or y1 >= y2 or x1 < 0 or y1 < 0:
+                    raise ValueError("区域无效")
+                boxes.append((x1, y1, x2, y2))
+            if len(boxes) == 1:
+                return boxes[0]
+            return boxes
         except ValueError:
             self.status_label.setText(
-                get_text("watermark.status.fail", "水印区域格式应为 x1,y1,x2,y2(像素)"))
+                get_text("watermark.status.fail",
+                         "水印区域格式应为 x1,y1,x2,y2(像素), 多个用分号分隔"))
             return self._PARSE_ERROR
 
     def _on_cancel_click(self):
