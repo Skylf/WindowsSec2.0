@@ -83,6 +83,14 @@ class GUI(QMainWindow):
     enroll_progress_received = pyqtSignal(str, str)   # 录入进度(stage, detail)
     enroll_result_received = pyqtSignal(object)       # 录入结果(dict)
     frame_received = pyqtSignal(object, str)          # 摄像头帧(frame, prompt), 供全屏画面页显示
+    bsod_result_received = pyqtSignal(object)         # 蓝屏检测结果(dict)
+    bsod_autostart_result_received = pyqtSignal(object)   # 蓝屏自启动状态(dict)
+    freeze_status_received = pyqtSignal(object)       # 卡死监控状态(dict)
+    freeze_config_received = pyqtSignal(object)       # 卡死检测配置(dict)
+    freeze_alert_received = pyqtSignal(object)        # 卡死报警(dict)
+    watermark_progress_received = pyqtSignal(object)  # 去水印进度(dict: percent/info)
+    watermark_result_received = pyqtSignal(object)    # 去水印结果(dict)
+    watermark_busy_received = pyqtSignal(object)      # 去水印处理状态(dict: busy)
 
     def __init__(self, uiRsp):
         """
@@ -226,6 +234,71 @@ class GUI(QMainWindow):
         :return: None
         """
         self.frame_received.emit(frame, prompt)
+
+    def show_bsod_result(self, result_data):
+        """
+        显示蓝屏检测结果(经信号转发给蓝屏识别页)
+        :param result_data: 结果字典<dict>, 含 found/event/report
+        :return: None
+        """
+        self.bsod_result_received.emit(result_data)
+
+    def show_bsod_autostart_result(self, result_data):
+        """
+        显示蓝屏自启动状态(经信号转发给蓝屏识别页)
+        :param result_data: 结果字典<dict>, 含 enabled/ok
+        :return: None
+        """
+        self.bsod_autostart_result_received.emit(result_data)
+
+    def show_freeze_status(self, result_data):
+        """
+        显示卡死监控状态(经信号转发给卡死检测页)
+        :param result_data: 结果字典<dict>, 含 running/ok
+        :return: None
+        """
+        self.freeze_status_received.emit(result_data)
+
+    def show_freeze_config(self, result_data):
+        """
+        显示卡死检测配置(经信号转发给卡死检测页)
+        :param result_data: 结果字典<dict>, 含 config
+        :return: None
+        """
+        self.freeze_config_received.emit(result_data)
+
+    def show_freeze_alert(self, alert_data):
+        """
+        显示卡死报警(经信号转发给卡死检测页)
+        :param alert_data: 报警字典<dict>, 含 type/msg/time/top_processes/info
+        :return: None
+        """
+        self.freeze_alert_received.emit(alert_data)
+
+    def show_watermark_progress(self, progress_data):
+        """
+        显示去水印进度(经信号转发给视频去水印页)
+        :param progress_data: 进度字典<dict>, 含 percent/info
+        :return: None
+        """
+        self.watermark_progress_received.emit(progress_data)
+
+    def show_watermark_result(self, result_data):
+        """
+        显示去水印结果(经信号转发给视频去水印页)
+        :param result_data: 结果字典<dict>, 含 success/msg/output_path/
+                            watermark_bbox/frames/avg_ms/mode/note/cancelled
+        :return: None
+        """
+        self.watermark_result_received.emit(result_data)
+
+    def show_watermark_busy(self, busy_data):
+        """
+        显示去水印处理状态(经信号转发给视频去水印页, 控制按钮使能)
+        :param busy_data: 状态字典<dict>, 含 busy
+        :return: None
+        """
+        self.watermark_busy_received.emit(busy_data)
 
     # ---- 全屏画面页控制(由 MainWindow 覆写实现) ----
     def show_live_page(self):
@@ -431,6 +504,68 @@ class UiRsp(Observer):
         )
         return path if path else None
 
+    # ============================================================
+    # 蓝屏识别交互(经中心调度 → SecurityModule)
+    # ============================================================
+    def on_bsod_check(self, simulate=False):
+        """
+        [立即检测/模拟演示] 按钮响应: 请求蓝屏检测(经中心调度)
+        :param simulate: 是否使用模拟数据<bool>
+        :return: None
+        """
+        self._send("securityModule", {"simulate": simulate}, "BSOD_CHECK_REQUEST")
+
+    def on_bsod_autostart(self, enabled):
+        """
+        开机自启动开关响应: 注册/移除自启动(经中心调度)
+        :param enabled: 是否开启<bool>
+        :return: None
+        """
+        self._send("securityModule", {"enabled": enabled}, "BSOD_AUTOSTART_REQUEST")
+
+    def on_bsod_autostart_status(self):
+        """查询开机自启动状态(页面初始化调用)"""
+        self._send("securityModule", {}, "BSOD_AUTOSTART_STATUS_REQUEST")
+
+    # ============================================================
+    # 卡死检测交互(经中心调度 → FreezeModule)
+    # ============================================================
+    def on_freeze_start(self):
+        """[开始监控] → FreezeModule 启动持续监控"""
+        self._send("freezeModule", {}, "FREEZE_START_REQUEST")
+
+    def on_freeze_stop(self):
+        """[停止监控] → FreezeModule 停止持续监控"""
+        self._send("freezeModule", {}, "FREEZE_STOP_REQUEST")
+
+    def on_freeze_status(self):
+        """查询监控运行状态(页面初始化)"""
+        self._send("freezeModule", {}, "FREEZE_STATUS_REQUEST")
+
+    def on_freeze_config_status(self):
+        """查询卡死检测配置(页面初始化加载)"""
+        self._send("freezeModule", {}, "FREEZE_CONFIG_STATUS_REQUEST")
+
+    # ============================================================
+    # 视频去水印交互(经中心调度 → WatermarkModule)
+    # ============================================================
+    def on_watermark_start(self, params):
+        """
+        [开始处理] 按钮响应: 请求后台处理视频(经中心调度)
+        :param params: 处理参数<dict>, 含 input/output/mode/quality/use_gpu
+        :return: None
+        """
+        self._send("watermarkModule", params, "WATERMARK_PROCESS_REQUEST")
+
+    def on_watermark_cancel(self):
+        """[取消] 按钮响应: 请求取消当前处理(经中心调度)"""
+        self._send("watermarkModule", {}, "WATERMARK_CANCEL_REQUEST")
+
+    def on_freeze_set_config(self, key, value):
+        """修改卡死检测配置项(阈值/总开关等)"""
+        self._send("freezeModule", {"key": key, "value": value},
+                   "FREEZE_SET_CONFIG_REQUEST")
+
     def check_current_feature(self, user_name):
         """
         检查指定用户是否已有特征(文件操作类, 供录入页显示特征状态)
@@ -505,6 +640,46 @@ class UiRsp(Observer):
             module_name = content.get("moduleName", "?")
             online = content.get("online", False)
             self._gui.update_status(f"模块 {module_name} {'上线' if online else '下线'}")
+
+        elif event == "BSOD_CHECK_RESULT":
+            # 蓝屏检测结果: {found, event, report}
+            self._gui.show_bsod_result(content)
+            self._log(f"[蓝屏检测] {'发现蓝屏记录' if content.get('found') else '未发现蓝屏记录'}")
+
+        elif event == "BSOD_AUTOSTART_RESULT":
+            # 自启动操作结果: {enabled, ok}
+            self._gui.show_bsod_autostart_result(content)
+
+        elif event == "BSOD_AUTOSTART_STATUS_RESULT":
+            # 自启动状态查询结果: {enabled}
+            self._gui.show_bsod_autostart_result(content)
+
+        elif event == "FREEZE_STATUS_RESULT":
+            # 卡死监控状态: {running, ok}
+            self._gui.show_freeze_status(content)
+
+        elif event == "FREEZE_CONFIG_STATUS_RESULT":
+            # 卡死检测配置: {config}
+            self._gui.show_freeze_config(content)
+
+        elif event == "FREEZE_ALERT":
+            # 卡死报警: {type, msg, time, top_processes, info}
+            self._gui.show_freeze_alert(content)
+            self._log(f"[卡死报警] {content.get('msg', '')}")
+
+        elif event == "WATERMARK_PROGRESS":
+            # 去水印进度: {percent, info}
+            self._gui.show_watermark_progress(content)
+
+        elif event == "WATERMARK_RESULT":
+            # 去水印结果: {success, msg, output_path, watermark_bbox, ...}
+            self._gui.show_watermark_result(content)
+            self._log(f"[去水印] {'完成' if content.get('success') else '失败'}: "
+                      f"{content.get('msg', '')}")
+
+        elif event == "WATERMARK_BUSY":
+            # 去水印处理状态: {busy}
+            self._gui.show_watermark_busy(content)
 
         else:
             # 未知事件: 记录但不崩溃

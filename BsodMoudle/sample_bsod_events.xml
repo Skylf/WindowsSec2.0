@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  模拟蓝屏事件数据(模拟生产环境)
+  ==============================
+  格式与 wevtutil qe System 输出一致(BugCheck 事件 EventID 1001),
+  供 checkLatestBugCheck(simulate=True) 解析, 在无真实蓝屏记录的机器上
+  模拟生产环境完整演示"检测 → 报告 → 弹窗"流程。
+  内容为虚构演示数据。
+-->
+<Events>
+  <Event>
+    <System>
+      <Provider Name="Microsoft-Windows-WER-SystemErrorReporting"/>
+      <EventID>1001</EventID>
+      <TimeCreated SystemTime="2026-08-15T03:22:47.000Z"/>
+    </System>
+    <EventData>
+      <Data Name="BugcheckCode">126</Data>
+      <Data Name="BugcheckParameter1">0xffffffff`c0000005</Data>
+      <Data Name="BugcheckParameter2">0x0</Data>
+      <Data Name="BugcheckParameter3">0x0</Data>
+      <Data Name="BugcheckParameter4">0x0</Data>
+    </EventData>
+  </Event>
+  <Event>
+    <System>
+      <Provider Name="Microsoft-Windows-WER-SystemErrorReporting"/>
+      <EventID>1001</EventID>
+      <TimeCreated SystemTime="2026-08-14T19:05:12.000Z"/>
+    </System>
+    <EventData>
+      <Data Name="BugcheckCode">278</Data>
+      <Data Name="BugcheckParameter1">0x0</Data>
+      <Data Name="BugcheckParameter2">0x0</Data>
+      <Data Name="BugcheckParameter3">0x0</Data>
+      <Data Name="BugcheckParameter4">0x0</Data>
+    </EventData>
+  </Event>
+  <Event>
+    <System>
+      <Provider Name="Microsoft-Windows-WER-SystemErrorReporting"/>
+      <EventID>1001</EventID>
+      <TimeCreated SystemTime="2026-08-13T11:40:33.000Z"/>
+    </System>
+    <EventData>
+      <Data Name="BugcheckCode">292</Data>
+      <Data Name="BugcheckParameter1">0xffffffff`c0000005</Data>
+      <Data Name="BugcheckParameter2">0xfffff804`2a1f5e40</Data>
+      <Data Name="BugcheckParameter3">0xffffc500`a1b2c3d0</Data>
+      <Data Name="BugcheckParameter4">0x0</Data>
+    </EventData>
+  </Event>
+</Events>

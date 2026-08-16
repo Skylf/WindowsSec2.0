@@ -309,6 +309,17 @@ QLabel#settingValue {
     font-size: 14px;
 }
 
+/* ── 蓝屏识别: 检测结果区 ── */
+QPlainTextEdit#bsodResultText {
+    background-color: #0D1424;
+    color: #D1D5DB;
+    border: 1px solid #1E2A44;
+    border-radius: 8px;
+    font-family: "Microsoft YaHei";
+    font-size: 13px;
+    padding: 10px;
+}
+
 /* ── 密码管理: 环形图卡片 ── */
 QFrame#gaugeCard {
     background-color: #151E32;
@@ -375,6 +386,33 @@ QLineEdit#enrollInput, QLineEdit#passwordInput {
 }
 QLineEdit#enrollInput:focus, QLineEdit#passwordInput:focus {
     border: 1px solid #3B82F6;
+}
+
+/* ── 去水印页: 路径输入框 ── */
+QLineEdit#pathEdit {
+    background-color: #1F2937;
+    color: #D1D5DB;
+    border: 1px solid #2D3A52;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+}
+QLineEdit#pathEdit:focus { border: 1px solid #3B82F6; }
+QLineEdit#pathEdit:disabled { color: #6B7280; }
+
+/* ── 去水印页: 进度条 ── */
+QProgressBar#watermarkProgress {
+    background-color: #1F2937;
+    border: 1px solid #2D3A52;
+    border-radius: 6px;
+    height: 14px;
+    text-align: center;
+    color: #D1D5DB;
+    font-size: 11px;
+}
+QProgressBar#watermarkProgress::chunk {
+    background-color: #3B82F6;
+    border-radius: 5px;
 }
 
 /* ── 下拉框 ── */

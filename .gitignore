@@ -20,8 +20,7 @@ env/
 *.swo
 
 # === 模型文件 ===
-# 模型使用 Git LFS 管理(见 .gitattributes),不在此忽略
-
+# 模型使用 Git LFS 管理(见 .gitattributes), 不在此处忽略
 # === 构建产物 ===
 build/
 dist/
@@ -32,10 +31,20 @@ dist/
 logs/
 temp/
 
+# === AI 配置(含 api key, 不进 git) ===
+BsodMoudle/ai_config.json
+
+# === 卡死检测本地配置(用户阈值, 不进 git) ===
+FreezeMoudle/freeze_config.json
+
+# === 视频去水印本地配置(不进 git) ===
+WatermarkMoudle/watermark_config.json
+
 # === 缓存目录(采集的原始图片等,不进 git) ===
 cache/
 
 # === 临时测试结果与调试文件 ===
 test/a
 test/b
+out_*.txt
 FaceMoudle/liveness/landmark_debug.jpg

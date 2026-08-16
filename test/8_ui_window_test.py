@@ -2,7 +2,7 @@
 """
 UI 主窗口验证(离屏模式, 不弹真实窗口)
 ======================================
-验证: 窗口尺寸/固定/无边框 / 样式加载 / 导航 8 项 / 页面注册与切换
+验证: 窗口尺寸/固定/无边框 / 样式加载 / 导航 9 项 / 页面注册与切换
       / 概览页(评分卡+网格+统计条) / 识别页标签 / 密码/蓝屏/卡死页
       / 滑动开关 SwitchButton / 环形仪表 GaugeWidget / 文本解耦 / 全屏
 """
@@ -54,16 +54,16 @@ def main():
     assert "#0B1120" in qss
     print(f"  ✓ 样式表 {len(qss)} 字符, 含设计配色")
 
-    print("[3] 导航栏: 8 项(复刻设计图) + 页面注册 10 个(8 导航页 + 账户页 + 全屏画面页)")
+    print("[3] 导航栏: 9 项(8 项复刻设计图 + 视频去水印) + 页面注册 11 个(9 导航页 + 账户页 + 全屏画面页)")
     nav = win._nav
-    assert nav.count() == 8, f"导航应有 8 项, 实际 {nav.count()}"
+    assert nav.count() == 9, f"导航应有 9 项, 实际 {nav.count()}"
     nav_texts = [nav.item(i).text() for i in range(nav.count())]
     print(f"  ✓ 导航: {nav_texts}")
-    assert len(win._pages) == 10, f"应注册 10 个页面(含账户页/画面页), 实际 {len(win._pages)}"
+    assert len(win._pages) == 11, f"应注册 11 个页面(含账户页/画面页), 实际 {len(win._pages)}"
     assert all(pid in win._pages for _, pid, _ in NAV_ITEMS)
     assert "account" in win._pages, "应注册账户页(不加入导航)"
     assert "live" in win._pages, "应注册全屏画面页(不加入导航)"
-    print("  ✓ 页面注册 10 个(8 导航页 + 隐藏账户页/画面页)")
+    print("  ✓ 页面注册 11 个(9 导航页 + 隐藏账户页/画面页)")
 
     print("[4] 导航联动 + 默认页(安全概览)")
     assert win._stack.currentWidget() is win.get_page("overview"), "默认应为安全概览"
@@ -138,22 +138,24 @@ def main():
     assert pwd.update_btn.text() == "更新密码"
     print("  ✓ 环形图(强 95% ±9%)/密码输入(掩码)/检查列表 齐全")
 
-    print("[8] 蓝屏识别页: 模拟蓝屏 + 智能防护开关")
+    print("[8] 蓝屏识别页: 检测结果区 + 检测设置(自启动开关/立即检测/模拟演示)")
     bsod = win.get_page("bsod")
     assert isinstance(bsod, BsodPage)
-    assert isinstance(bsod.switch_repair, SwitchButton) and bsod.switch_repair.isChecked()
-    assert bsod.repair_btn.text() == "立即修复"
-    sim = bsod.findChild(QFrame, "bsodSim")
-    assert sim is not None, "应有模拟蓝屏"
-    print("  ✓ 蓝屏模拟(:( + 20% 完成)/3 个防护开关 齐全")
+    assert isinstance(bsod.switch_autostart, SwitchButton), "应有自启动开关"
+    assert bsod.check_btn.text() == "立即检测"
+    assert bsod.simulate_btn.text() == "模拟演示"
+    assert bsod.result_text is not None, "应有检测结果区"
+    print("  ✓ 自启动开关/立即检测/模拟演示/结果区 齐全")
 
-    print("[9] 卡死检测页: 仪表盘 + 检测设置")
+    print("[9] 卡死检测页: 监控状态区 + 检测设置(总开关/下拉/开始停止)")
     freeze = win.get_page("freeze")
     assert isinstance(freeze, FreezePage)
-    assert isinstance(freeze.gauge, GaugeWidget)
-    assert len(freeze.combos) == 4, "应有 4 个设置下拉"
-    assert isinstance(freeze.auto_kill, SwitchButton)
-    print("  ✓ 仪表盘(系统状态 正常)/4 个下拉/自动结束开关 齐全")
+    assert isinstance(freeze.switch_enabled, SwitchButton), "应有检测总开关"
+    assert len(freeze._combos) == 4, "应有 4 个设置下拉"
+    assert freeze.start_btn.text() == "开始监控"
+    assert freeze.stop_btn.text() == "停止监控"
+    assert freeze.alerts_text is not None, "应有报警历史区"
+    print("  ✓ 总开关/4 个阈值下拉/开始停止按钮/报警历史区 齐全")
 
     print("[10] 文本解耦合: 双语切换 + 用户数据源(userInfo)")
     assert get_text("window.title") == "Windows 安全系统 2.0 控制面板"

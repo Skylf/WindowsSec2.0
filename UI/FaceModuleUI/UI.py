@@ -17,7 +17,7 @@ lateCodedTime:20260815
 # 完全复刻 UI 最终效果图(深色科技风):
 #   无边框窗口 + 自定义标题栏 + 左侧导航(8 项) + 右侧页面容器
 # 页面: 安全概览 / 人脸识别(识别+录入同页) / 密码管理 / 蓝屏识别
-#       / 卡死检测 / 安全中心 / 防护日志 / 设置
+#       / 卡死检测 / 视频去水印 / 安全中心 / 防护日志 / 设置
 # 约束:
 #   1. 窗口固定 1024x632(黄金分割), F11/标题栏按钮全屏(内部布局等比缩放), 禁止拖动改大小
 #   2. 文字内容解耦合: 全部经 texts.get_text() 读取(string.xml 风格)
@@ -46,7 +46,8 @@ if _CENTER_MOUDLE_DIR not in sys.path:
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QListWidget, QHBoxLayout, QVBoxLayout,
     QGridLayout, QFrame, QComboBox, QPushButton, QStackedWidget, QTabBar,
-    QLineEdit, QAbstractButton, QToolTip,
+    QLineEdit, QAbstractButton, QToolTip, QPlainTextEdit,
+    QFileDialog, QProgressBar,
 )
 from PyQt6.QtCore import Qt, pyqtProperty, QPropertyAnimation, QEasingCurve, QPoint, pyqtSignal, QTimer, QRectF
 from PyQt6.QtGui import QKeySequence, QShortcut, QPainter, QColor, QCursor, QImage, QPixmap, QPen, QFont
@@ -75,6 +76,7 @@ NAV_ITEMS = [
     ("nav.password", "password", "🔒"),
     ("nav.bsod", "bsod", "🖥"),
     ("nav.freeze", "freeze", "⏳"),
+    ("nav.watermark", "watermark", "🎬"),
     ("nav.security_center", "security_center", "🏠"),
     ("nav.protect_log", "protect_log", "📋"),
     ("nav.settings", "settings", "⚙"),
@@ -398,6 +400,7 @@ class MainWindow(GUI):
         self.add_page(PasswordPage(self), "password")
         self.add_page(BsodPage(self), "bsod")
         self.add_page(FreezePage(self), "freeze")
+        self.add_page(WatermarkPage(self), "watermark")
         # 账户页(从头像点击进入, 不加入左侧导航)
         self.add_page(AccountPage(self), "account")
         # 全屏摄像头画面页(录入/识别进行时显示, 不加入左侧导航)
@@ -1124,78 +1127,97 @@ class PasswordPage(QWidget):
 # 蓝屏识别页
 # ====================================================================
 class BsodPage(QWidget):
-    """蓝屏识别(复刻设计图): 左模拟蓝屏 + 右智能防护"""
+    """
+    蓝屏识别页(接入真实检测)
+    ========================
+    左: 检测结果区(最近蓝屏报告文本, 只读滚动)
+    右: 检测设置卡(开机自启动开关 / 立即检测 / 模拟演示 / 状态)
+    业务链路: 按钮 → UiRsp.on_bsod_check → 中心调度 → SecurityModule
+              → BSOD_CHECK_RESULT 事件 → 主线程 → 本页显示报告
+    """
 
     def __init__(self, gui):
         super().__init__()
+        self._gui = gui
+        self._rsp = gui.get_rsp()
         self.setObjectName("bsodPage")
 
         body = QHBoxLayout()
         body.setContentsMargins(24, 16, 24, 24)
         body.setSpacing(20)
-        body.addWidget(self._build_bsod_sim(), 4)
-        body.addWidget(self._build_protect_card(), 3)
+        body.addWidget(self._build_result_card(), 4)
+        body.addWidget(self._build_settings_card(), 3)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(make_page_header("bsod.title"))
         layout.addLayout(body, 1)
 
-    def _build_bsod_sim(self) -> QFrame:
-        sim = QFrame()
-        sim.setObjectName("bsodSim")
-        face = QLabel(":(")
-        face.setObjectName("bsodFace")
-        face.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title = QLabel(get_text("bsod.sim_title"))
-        title.setObjectName("bsodTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        text = QLabel(get_text("bsod.sim_text"))
-        text.setObjectName("bsodText")
-        text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        text.setWordWrap(True)
-        progress = QLabel(get_text("bsod.sim_progress"))
-        progress.setObjectName("bsodProgress")
-        progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 连接蓝屏结果信号(主线程)
+        gui.bsod_result_received.connect(self._on_bsod_result)
+        gui.bsod_autostart_result_received.connect(self._on_autostart_result)
+        self._status_queried = False   # 自启动状态查询标记(首次显示时查询)
 
-        layout = QVBoxLayout(sim)
-        layout.setContentsMargins(30, 40, 30, 40)
-        layout.addStretch(1)
-        layout.addWidget(face)
-        layout.addSpacing(20)
+    def showEvent(self, event):
+        """首次显示时查询自启动状态(UiRsp 此时已注册调度)"""
+        super().showEvent(event)
+        if not self._status_queried and self._rsp is not None:
+            self._status_queried = True
+            self._rsp.on_bsod_autostart_status()
+
+    # ── 左侧: 检测结果区 ──
+    def _build_result_card(self) -> QFrame:
+        card = make_card("card")
+        title = QLabel(get_text("bsod.result_title"))
+        title.setObjectName("cardTitle")
+
+        self.result_text = QPlainTextEdit()
+        self.result_text.setObjectName("bsodResultText")
+        self.result_text.setReadOnly(True)
+        self.result_text.setPlaceholderText(get_text("bsod.status.idle"))
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 20, 20, 20)
         layout.addWidget(title)
-        layout.addSpacing(12)
-        layout.addWidget(text)
-        layout.addSpacing(24)
-        layout.addWidget(progress)
-        layout.addStretch(1)
-        return sim
+        layout.addSpacing(10)
+        layout.addWidget(self.result_text, 1)
+        return card
 
-    def _build_protect_card(self) -> QFrame:
+    # ── 右侧: 检测设置卡 ──
+    def _build_settings_card(self) -> QFrame:
         card = make_card("settingsCard")
-        title = QLabel(get_text("bsod.protect_title"))
+        title = QLabel(get_text("bsod.settings_title"))
         title.setObjectName("settingsTitle")
 
-        self.switch_repair = SwitchButton()
-        self.switch_repair.setChecked(True)
-        self.switch_report = SwitchButton()
-        self.switch_report.setChecked(True)
-        self.switch_backup = SwitchButton()
-        self.switch_backup.setChecked(True)
+        # 开机自启动检查开关(联动注册表 Run)
+        self.switch_autostart = SwitchButton()
+        self.switch_autostart.setChecked(False)   # 初始未知, 由状态查询结果设置
+        self.switch_autostart.toggled.connect(self._on_autostart_toggled)
 
-        self.repair_btn = QPushButton(get_text("bsod.btn.repair"))
-        self.repair_btn.setObjectName("primaryBtn")
+        # 立即检测 / 模拟演示按钮
+        self.check_btn = QPushButton(get_text("bsod.check.btn"))
+        self.check_btn.setObjectName("primaryBtn")
+        self.check_btn.clicked.connect(lambda: self._on_check_click(simulate=False))
+        self.simulate_btn = QPushButton(get_text("bsod.check.simulate"))
+        self.simulate_btn.setObjectName("primaryBtn")
+        self.simulate_btn.clicked.connect(lambda: self._on_check_click(simulate=True))
+
+        # 状态文字
+        self.status_label = QLabel(get_text("bsod.status.idle"))
+        self.status_label.setObjectName("settingValue")
+        self.status_label.setWordWrap(True)
 
         layout = QVBoxLayout(card)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
         layout.addWidget(title)
         layout.addSpacing(6)
-        layout.addLayout(self._switch_row("bsod.switch.auto_repair", self.switch_repair))
-        layout.addLayout(self._switch_row("bsod.switch.report", self.switch_report))
-        layout.addLayout(self._switch_row("bsod.switch.backup", self.switch_backup))
+        layout.addLayout(self._switch_row("bsod.autostart", self.switch_autostart))
+        layout.addSpacing(10)
+        layout.addWidget(self.check_btn)
+        layout.addWidget(self.simulate_btn)
         layout.addStretch(1)
-        layout.addWidget(self.repair_btn)
+        layout.addWidget(self.status_label)
         return card
 
     def _switch_row(self, label_key, switch) -> QHBoxLayout:
@@ -1207,21 +1229,83 @@ class BsodPage(QWidget):
         row.addWidget(switch)
         return row
 
+    # ============================================================
+    # 交互(经 UiRsp → 中心调度 → SecurityModule)
+    # ============================================================
+    def _on_check_click(self, simulate=False):
+        """[立即检测/模拟演示] → UiRsp.on_bsod_check"""
+        self.status_label.setText(get_text("bsod.status.checking"))
+        self.result_text.clear()
+        if self._rsp is not None:
+            self._rsp.on_bsod_check(simulate=simulate)
+        else:
+            self.status_label.setText(get_text("bsod.status.fail", "未绑定 UiRsp"))
+
+    def _on_autostart_toggled(self, checked):
+        """开机自启动开关 → UiRsp.on_bsod_autostart"""
+        if self._rsp is not None:
+            self._rsp.on_bsod_autostart(checked)
+        else:
+            # 未绑定响应层: 回滚开关
+            self.switch_autostart.blockSignals(True)
+            self.switch_autostart.setChecked(not checked)
+            self.switch_autostart.blockSignals(False)
+
+    # ============================================================
+    # 结果联动(连接主窗口信号, 主线程执行)
+    # ============================================================
+    def _on_bsod_result(self, result_data):
+        """蓝屏检测结果 → 报告区/状态显示"""
+        if result_data.get("found"):
+            report = result_data.get("report", "")
+            self.result_text.setPlainText(report)
+            self.status_label.setText(get_text("bsod.status.found"))
+        else:
+            self.result_text.clear()
+            self.status_label.setText(get_text("bsod.status.none"))
+
+    def _on_autostart_result(self, result_data):
+        """自启动状态/操作结果 → 开关同步"""
+        if "enabled" in result_data:
+            enabled = bool(result_data.get("enabled"))
+            # 避免触发 toggled 循环
+            self.switch_autostart.blockSignals(True)
+            self.switch_autostart.setChecked(enabled)
+            self.switch_autostart.blockSignals(False)
+
 
 # ====================================================================
 # 卡死检测页
 # ====================================================================
 class FreezePage(QWidget):
-    """卡死检测(复刻设计图): 左环形仪表盘 + 右检测设置"""
+    """
+    卡死检测页(接入真实监控)
+    ========================
+    左: 监控状态区(运行状态 + 报警历史)
+    右: 检测设置卡(总开关/间隔/阈值/超时 + 开始/停止监控)
+    业务链路: 按钮/控件 → UiRsp.on_freeze_* → 中心调度 → FreezeModule
+              → 状态/配置/报警事件 → 主线程 → 本页更新
+    """
+
+    # 配置项 → (下拉选项值列表)
+    _CONFIG_OPTIONS = {
+        "sample_interval": [5.0, 10.0, 30.0],
+        "cpu_threshold": [70.0, 80.0, 90.0],
+        "mem_threshold": [80.0, 90.0, 95.0],
+        "ui_timeout_ms": [3000, 5000, 10000],
+    }
 
     def __init__(self, gui):
         super().__init__()
+        self._gui = gui
+        self._rsp = gui.get_rsp()
+        self._status_queried = False
         self.setObjectName("freezePage")
 
         body = QHBoxLayout()
         body.setContentsMargins(24, 16, 24, 24)
         body.setSpacing(20)
-        body.addWidget(self._build_gauge_card(), 4)
+        body.addWidget(self._build_status_card(), 4)
         body.addWidget(self._build_settings_card(), 3)
 
         layout = QVBoxLayout(self)
@@ -1229,59 +1313,418 @@ class FreezePage(QWidget):
         layout.addLayout(make_page_header("freeze.title"))
         layout.addLayout(body, 1)
 
-    def _build_gauge_card(self) -> QFrame:
-        card = make_card("gaugeCard")
-        self.gauge = GaugeWidget(arc_start=135, arc_span=270)
-        self.gauge.set_center(get_text("freeze.gauge_title"),
-                              get_text("freeze.gauge_status"))
+        # 连接信号(主线程)
+        gui.freeze_status_received.connect(self._on_status)
+        gui.freeze_config_received.connect(self._on_config)
+        gui.freeze_alert_received.connect(self._on_alert)
+
+    def showEvent(self, event):
+        """首次显示时加载配置与运行状态(UiRsp 已注册)"""
+        super().showEvent(event)
+        if not self._status_queried and self._rsp is not None:
+            self._status_queried = True
+            self._rsp.on_freeze_config_status()
+            self._rsp.on_freeze_status()
+
+    # ── 左侧: 监控状态区 ──
+    def _build_status_card(self) -> QFrame:
+        card = make_card("card")
+        title = QLabel(get_text("freeze.status_title"))
+        title.setObjectName("cardTitle")
+
+        # 运行状态
+        self.status_label = QLabel(get_text("freeze.status.stopped"))
+        self.status_label.setObjectName("freezeStatusLabel")
+        self.status_label.setWordWrap(True)
+
+        # 报警历史
+        alerts_title = QLabel(get_text("freeze.alerts_title"))
+        alerts_title.setObjectName("cardText")
+        self.alerts_text = QPlainTextEdit()
+        self.alerts_text.setObjectName("bsodResultText")   # 复用蓝屏报告区样式
+        self.alerts_text.setReadOnly(True)
+        self.alerts_text.setPlaceholderText(get_text("freeze.alerts_empty"))
+
         layout = QVBoxLayout(card)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.addWidget(self.gauge)
+        layout.addWidget(title)
+        layout.addSpacing(6)
+        layout.addWidget(self.status_label)
+        layout.addSpacing(10)
+        layout.addWidget(alerts_title)
+        layout.addSpacing(6)
+        layout.addWidget(self.alerts_text, 1)
         return card
 
+    # ── 右侧: 检测设置卡 ──
     def _build_settings_card(self) -> QFrame:
         card = make_card("settingsCard")
         title = QLabel(get_text("freeze.settings_title"))
         title.setObjectName("settingsTitle")
 
-        # 四个下拉行: (标签 key, 选项 keys)
-        rows = [
-            ("freeze.interval", ["freeze.interval_30s", "freeze.interval_60s", "freeze.interval_120s"]),
-            ("freeze.cpu", ["freeze.percent_90", "freeze.percent_80", "freeze.percent_70"]),
-            ("freeze.mem", ["freeze.percent_90", "freeze.percent_80", "freeze.percent_70"]),
-            ("freeze.timeout", ["freeze.timeout_10s", "freeze.timeout_20s", "freeze.timeout_30s"]),
-        ]
-        self.combos = []
-        self.auto_kill = SwitchButton()
-        self.auto_kill.setChecked(True)
+        # 检测总开关(联动 freezeConfig.enabled)
+        self.switch_enabled = SwitchButton()
+        self.switch_enabled.setChecked(True)
+        self.switch_enabled.toggled.connect(
+            lambda checked: self._set_config("enabled", checked))
 
         layout = QVBoxLayout(card)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(12)
         layout.addWidget(title)
         layout.addSpacing(6)
-        for label_key, option_keys in rows:
+        layout.addLayout(self._make_switch_row("freeze.enabled", self.switch_enabled))
+        layout.addSpacing(4)
+
+        # 配置下拉: 标签 key → (配置 key, 显示格式)
+        self._combos = {}
+        rows = [
+            ("freeze.interval", "sample_interval", "{0:.0f} s"),
+            ("freeze.cpu", "cpu_threshold", "{0:.0f}%"),
+            ("freeze.mem", "mem_threshold", "{0:.0f}%"),
+            ("freeze.timeout", "ui_timeout_ms", "{0:.0f} ms"),
+        ]
+        for label_key, cfg_key, fmt in rows:
             row = QHBoxLayout()
             label = QLabel(get_text(label_key))
             label.setObjectName("settingLabel")
             combo = QComboBox()
-            combo.addItems([get_text(k) for k in option_keys])
+            for value in self._CONFIG_OPTIONS[cfg_key]:
+                combo.addItem(fmt.format(value), value)
             combo.setCurrentIndex(0)
-            self.combos.append(combo)
+            combo.currentIndexChanged.connect(
+                lambda idx, k=cfg_key, c=combo: self._set_config(k, c.itemData(idx)))
+            self._combos[cfg_key] = combo
             row.addWidget(label)
             row.addStretch(1)
             row.addWidget(combo)
             layout.addLayout(row)
-        layout.addSpacing(6)
-        auto_row = QHBoxLayout()
-        auto_label = QLabel(get_text("freeze.auto_kill"))
-        auto_label.setObjectName("settingLabel")
-        auto_row.addWidget(auto_label)
-        auto_row.addStretch(1)
-        auto_row.addWidget(self.auto_kill)
-        layout.addLayout(auto_row)
+
+        # 开始/停止监控按钮
+        self.start_btn = QPushButton(get_text("freeze.btn.start"))
+        self.start_btn.setObjectName("primaryBtn")
+        self.start_btn.clicked.connect(lambda: self._on_start_click())
+        self.stop_btn = QPushButton(get_text("freeze.btn.stop"))
+        self.stop_btn.setObjectName("primaryBtn")
+        self.stop_btn.clicked.connect(lambda: self._on_stop_click())
         layout.addStretch(1)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.start_btn)
+        btn_row.addWidget(self.stop_btn)
+        layout.addLayout(btn_row)
         return card
+
+    def _make_switch_row(self, label_key, switch) -> QHBoxLayout:
+        row = QHBoxLayout()
+        label = QLabel(get_text(label_key))
+        label.setObjectName("settingLabel")
+        row.addWidget(label)
+        row.addStretch(1)
+        row.addWidget(switch)
+        return row
+
+    # ============================================================
+    # 交互(经 UiRsp → 中心调度 → FreezeModule)
+    # ============================================================
+    def _on_start_click(self):
+        if self._rsp is not None:
+            self._rsp.on_freeze_start()
+
+    def _on_stop_click(self):
+        if self._rsp is not None:
+            self._rsp.on_freeze_stop()
+
+    def _set_config(self, key, value):
+        if self._rsp is not None:
+            self._rsp.on_freeze_set_config(key, value)
+
+    # ============================================================
+    # 结果联动(连接主窗口信号, 主线程执行)
+    # ============================================================
+    def _on_status(self, result_data):
+        """监控运行状态 → 状态显示"""
+        if result_data.get("running"):
+            interval = self._current_cfg.get("sample_interval", 5.0)
+            self.status_label.setText(
+                get_text("freeze.status.running", f"{interval:.0f}"))
+        else:
+            self.status_label.setText(get_text("freeze.status.stopped"))
+
+    def _on_config(self, result_data):
+        """配置加载 → 控件同步(blockSignals 避免循环写回)"""
+        self._current_cfg = result_data.get("config", {})
+        cfg = self._current_cfg
+        # 总开关
+        self.switch_enabled.blockSignals(True)
+        self.switch_enabled.setChecked(bool(cfg.get("enabled", True)))
+        self.switch_enabled.blockSignals(False)
+        # 下拉
+        for cfg_key, combo in self._combos.items():
+            current = cfg.get(cfg_key)
+            idx = combo.findData(current)
+            combo.blockSignals(True)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+
+    def _on_alert(self, alert_data):
+        """卡死报警 → 追加到报警历史 + 更新状态"""
+        line = f"[{alert_data.get('time', '')}] {alert_data.get('msg', '')}"
+        self.alerts_text.appendPlainText(line)
+        self.status_label.setText(get_text("freeze.status.alert", line))
+
+
+# ====================================================================
+# WatermarkPage: 视频去水印页(接入真实处理)
+# ====================================================================
+class WatermarkPage(QWidget):
+    """
+    视频去水印页(本地离线处理)
+    ==========================
+    左: 处理结果区(进度条 + 状态 + 结果文本, 只读滚动)
+    右: 处理设置卡(输入/输出路径 + 水印类型/修复质量/GPU 开关 + 开始/取消)
+    业务链路: 按钮 → UiRsp.on_watermark_* → 中心调度 → WatermarkModule
+              → WATERMARK_PROGRESS/RESULT 事件 → 主线程 → 本页更新
+    """
+
+    # 下拉选项: (空间名, 显示文本, 实际值)
+    _MODE_OPTIONS = [
+        ("watermark.mode.static", "static"),
+        ("watermark.mode.dynamic", "dynamic"),
+    ]
+    _QUALITY_OPTIONS = [
+        ("watermark.quality.fast", "fast"),
+        ("watermark.quality.lama", "lama"),
+    ]
+    _GPU_OPTIONS = [
+        ("watermark.gpu.auto", "auto"),
+        ("watermark.gpu.on", "on"),
+        ("watermark.gpu.off", "off"),
+    ]
+    _VIDEO_FILTER = "视频文件 (*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.ts);;所有文件 (*)"
+
+    def __init__(self, gui):
+        super().__init__()
+        self._gui = gui
+        self._rsp = gui.get_rsp()
+        self.setObjectName("watermarkPage")
+
+        body = QHBoxLayout()
+        body.setContentsMargins(24, 16, 24, 24)
+        body.setSpacing(20)
+        body.addWidget(self._build_result_card(), 4)
+        body.addWidget(self._build_settings_card(), 3)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(make_page_header("watermark.title"))
+        layout.addLayout(body, 1)
+
+        # 连接处理信号(主线程)
+        gui.watermark_progress_received.connect(self._on_progress)
+        gui.watermark_result_received.connect(self._on_result)
+        gui.watermark_busy_received.connect(self._on_busy)
+
+    # ── 左侧: 处理结果区 ──
+    def _build_result_card(self) -> QFrame:
+        card = make_card("card")
+        title = QLabel(get_text("watermark.result_title"))
+        title.setObjectName("cardTitle")
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setObjectName("watermarkProgress")
+        self.progress_bar.setFormat("%p%")
+
+        self.status_label = QLabel(get_text("watermark.status.idle"))
+        self.status_label.setObjectName("settingValue")
+        self.status_label.setWordWrap(True)
+
+        self.result_text = QPlainTextEdit()
+        self.result_text.setObjectName("bsodResultText")   # 复用报告区样式
+        self.result_text.setReadOnly(True)
+        self.result_text.setPlaceholderText(get_text("watermark.status.idle"))
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.addWidget(title)
+        layout.addSpacing(10)
+        layout.addWidget(self.progress_bar)
+        layout.addSpacing(8)
+        layout.addWidget(self.status_label)
+        layout.addSpacing(10)
+        layout.addWidget(self.result_text, 1)
+        return card
+
+    # ── 右侧: 处理设置卡 ──
+    def _build_settings_card(self) -> QFrame:
+        card = make_card("settingsCard")
+        title = QLabel(get_text("watermark.settings_title"))
+        title.setObjectName("settingsTitle")
+
+        # 输入视频
+        self.input_edit = QLineEdit()
+        self.input_edit.setObjectName("pathEdit")
+        self.input_edit.setPlaceholderText(get_text("watermark.input.placeholder"))
+        input_btn = QPushButton(get_text("watermark.btn.browse"))
+        input_btn.clicked.connect(self._on_browse_input)
+
+        # 输出视频
+        self.output_edit = QLineEdit()
+        self.output_edit.setObjectName("pathEdit")
+        self.output_edit.setPlaceholderText(get_text("watermark.output.placeholder"))
+        output_btn = QPushButton(get_text("watermark.btn.browse"))
+        output_btn.clicked.connect(self._on_browse_output)
+
+        # 水印类型 / 修复质量 / GPU 开关
+        self.mode_combo = QComboBox()
+        for key, value in self._MODE_OPTIONS:
+            self.mode_combo.addItem(get_text(key), value)
+        self.quality_combo = QComboBox()
+        for key, value in self._QUALITY_OPTIONS:
+            self.quality_combo.addItem(get_text(key), value)
+        self.gpu_combo = QComboBox()
+        for key, value in self._GPU_OPTIONS:
+            self.gpu_combo.addItem(get_text(key), value)
+
+        # 开始/取消按钮
+        self.start_btn = QPushButton(get_text("watermark.btn.start"))
+        self.start_btn.setObjectName("primaryBtn")
+        self.start_btn.clicked.connect(self._on_start_click)
+        self.cancel_btn = QPushButton(get_text("watermark.btn.cancel"))
+        self.cancel_btn.setObjectName("primaryBtn")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._on_cancel_click)
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(10)
+        layout.addWidget(title)
+        layout.addSpacing(4)
+        layout.addLayout(self._field_row("watermark.input", self.input_edit, input_btn))
+        layout.addLayout(self._field_row("watermark.output", self.output_edit, output_btn))
+        layout.addSpacing(4)
+        layout.addLayout(self._combo_row("watermark.mode", self.mode_combo))
+        layout.addLayout(self._combo_row("watermark.quality", self.quality_combo))
+        layout.addLayout(self._combo_row("watermark.gpu", self.gpu_combo))
+        layout.addStretch(1)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.start_btn)
+        btn_row.addWidget(self.cancel_btn)
+        layout.addLayout(btn_row)
+        return card
+
+    @staticmethod
+    def _field_row(label_key, edit, button) -> QVBoxLayout:
+        row = QVBoxLayout()
+        label = QLabel(get_text(label_key))
+        label.setObjectName("settingLabel")
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(edit, 1)
+        btn_row.addWidget(button)
+        row.addWidget(label)
+        row.addLayout(btn_row)
+        return row
+
+    @staticmethod
+    def _combo_row(label_key, combo) -> QHBoxLayout:
+        row = QHBoxLayout()
+        label = QLabel(get_text(label_key))
+        label.setObjectName("settingLabel")
+        row.addWidget(label)
+        row.addStretch(1)
+        row.addWidget(combo)
+        return row
+
+    # ============================================================
+    # 交互(经 UiRsp → 中心调度 → WatermarkModule)
+    # ============================================================
+    def _on_browse_input(self):
+        """选择输入视频文件"""
+        path, _ = QFileDialog.getOpenFileName(self, get_text("watermark.input"),
+                                              "", self._VIDEO_FILTER)
+        if path:
+            self.input_edit.setText(path)
+
+    def _on_browse_output(self):
+        """选择输出视频保存位置"""
+        path, _ = QFileDialog.getSaveFileName(self, get_text("watermark.output"),
+                                              "", self._VIDEO_FILTER)
+        if path:
+            self.output_edit.setText(path)
+
+    def _on_start_click(self):
+        """[开始处理] → UiRsp.on_watermark_start"""
+        input_path = self.input_edit.text().strip().strip('"')
+        if not input_path:
+            self.status_label.setText(get_text("watermark.status.fail", "未选择输入视频"))
+            return
+        if not os.path.isfile(input_path):
+            self.status_label.setText(
+                get_text("watermark.status.fail", f"输入文件不存在: {input_path}"))
+            return
+        output_path = self.output_edit.text().strip().strip('"') or None
+        if self._rsp is not None:
+            self._rsp.on_watermark_start({
+                "input": input_path,
+                "output": output_path,
+                "mode": self.mode_combo.currentData(),
+                "quality": self.quality_combo.currentData(),
+                "use_gpu": self.gpu_combo.currentData(),
+            })
+        else:
+            self.status_label.setText(get_text("watermark.status.fail", "未绑定 UiRsp"))
+
+    def _on_cancel_click(self):
+        """[取消] → UiRsp.on_watermark_cancel"""
+        if self._rsp is not None:
+            self._rsp.on_watermark_cancel()
+
+    # ============================================================
+    # 结果联动(连接主窗口信号, 主线程执行)
+    # ============================================================
+    def _on_progress(self, progress_data):
+        """处理进度 → 进度条 + 状态"""
+        percent = int(progress_data.get("percent", 0))
+        info = progress_data.get("info", "")
+        self.progress_bar.setValue(percent)
+        self.status_label.setText(
+            get_text("watermark.status.processing", percent, info))
+
+    def _on_result(self, result_data):
+        """处理结果 → 进度条复位 + 结果文本"""
+        if result_data.get("cancelled"):
+            # 用户取消(与失败区分)
+            self.status_label.setText(get_text("watermark.status.cancelled"))
+            self.result_text.appendPlainText(get_text("watermark.result.cancelled"))
+        elif result_data.get("success"):
+            self.status_label.setText(
+                get_text("watermark.status.done", result_data.get("output_path", "")))
+            if result_data.get("watermark_bbox"):
+                self.result_text.appendPlainText(get_text(
+                    "watermark.result.done",
+                    result_data.get("output_path", ""),
+                    result_data.get("watermark_bbox"),
+                    result_data.get("mode", ""),
+                    result_data.get("avg_ms", 0),
+                    result_data.get("note", "")))
+            else:
+                self.result_text.appendPlainText(
+                    get_text("watermark.result.none"))
+        else:
+            self.status_label.setText(
+                get_text("watermark.status.fail", result_data.get("msg", "")))
+            self.result_text.appendPlainText(
+                get_text("watermark.status.fail", result_data.get("msg", "")))
+        self.progress_bar.setValue(0)
+
+    def _on_busy(self, busy_data):
+        """处理状态变化 → 按钮使能"""
+        busy = bool(busy_data.get("busy", False))
+        self.start_btn.setEnabled(not busy)
+        self.cancel_btn.setEnabled(busy)
+        self.input_edit.setEnabled(not busy)
+        self.output_edit.setEnabled(not busy)
 
 
 # ====================================================================
