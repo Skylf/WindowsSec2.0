@@ -430,7 +430,7 @@ QComboBox {
     border-radius: 6px;
     padding: 5px 10px;
     font-size: 13px;
-    min-width: 90px;
+    min-width: 130px;
 }
 QComboBox::drop-down { border: none; width: 24px; }
 QComboBox QAbstractItemView {
