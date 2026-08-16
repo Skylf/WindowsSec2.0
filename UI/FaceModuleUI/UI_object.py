@@ -555,10 +555,12 @@ class UiRsp(Observer):
         :param params: 处理参数<dict>, 含 input/output/mode/quality/use_gpu
         :return: None
         """
+        self._log(f"[去水印] 发起处理请求: {params}")
         self._send("watermarkModule", params, "WATERMARK_PROCESS_REQUEST")
 
     def on_watermark_cancel(self):
         """[取消] 按钮响应: 请求取消当前处理(经中心调度)"""
+        self._log("[去水印] 发起取消请求")
         self._send("watermarkModule", {}, "WATERMARK_CANCEL_REQUEST")
 
     def on_freeze_set_config(self, key, value):
@@ -670,12 +672,28 @@ class UiRsp(Observer):
         elif event == "WATERMARK_PROGRESS":
             # 去水印进度: {percent, info}
             self._gui.show_watermark_progress(content)
+            # 里程碑日志(每 10% 记一次, 避免刷屏)
+            percent = int(content.get("percent", 0))
+            if percent - getattr(self, "_wm_last_pct", -10) >= 10:
+                self._wm_last_pct = percent
+                self._log(f"[去水印进度] {percent}%: {content.get('info', '')}")
 
         elif event == "WATERMARK_RESULT":
             # 去水印结果: {success, msg, output_path, watermark_bbox, ...}
             self._gui.show_watermark_result(content)
-            self._log(f"[去水印] {'完成' if content.get('success') else '失败'}: "
-                      f"{content.get('msg', '')}")
+            self._wm_last_pct = -10   # 进度里程碑复位
+            if content.get("cancelled"):
+                self._log(f"[去水印] 用户取消: {content.get('msg', '')}")
+            elif content.get("success"):
+                self._log(f"[去水印] 完成: {content.get('msg', '')} "
+                          f"→ {content.get('output_path', '')} "
+                          f"| 水印区域 {content.get('watermark_bbox')}")
+                if content.get("track_stats"):
+                    st = content["track_stats"]
+                    self._log(f"[去水印] 动态跟踪: 命中 {st['hit']}/{st['total']} "
+                              f"帧(命中率 {st['hit_rate']}%)")
+            else:
+                self._log(f"[去水印] 失败: {content.get('msg', '')}")
 
         elif event == "WATERMARK_BUSY":
             # 去水印处理状态: {busy}

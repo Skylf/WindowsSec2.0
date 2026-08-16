@@ -30,6 +30,7 @@ github:true@https://github.com/Skylf/WindowsSec2.0
 import os
 import sys
 import threading
+import time
 
 # 注入 CenterMoudle / WatermarkMoudle 目录
 _CENTER_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,7 @@ for _d in (_CENTER_DIR, _WM_DIR):
         sys.path.insert(0, _d)
 
 from observerObject import Observer
+import log
 
 
 class WatermarkModule(Observer):
@@ -70,6 +72,8 @@ class WatermarkModule(Observer):
         :return: None
         """
         from videoProcessor import removeWatermark
+        log.info("watermarkModule", "后台线程启动(去水印任务)")
+        t0 = time.time()
         try:
             def on_progress(percent, info):
                 self._publish("WATERMARK_PROGRESS",
@@ -85,10 +89,11 @@ class WatermarkModule(Observer):
                 progress_callback=on_progress,
                 cancel_event=self._cancel_event,
             )
+            result["elapsed_s"] = round(time.time() - t0, 1)
             self._publish("WATERMARK_RESULT", result)
         except Exception as e:   # 兜底: 任何异常都回报, 不吞掉
             import traceback
-            traceback.print_exc()
+            log.error("watermarkModule", f"处理异常:\n{traceback.format_exc()}")
             self._publish("WATERMARK_RESULT", {
                 "success": False,
                 "msg": f"处理异常: {e}",
@@ -101,11 +106,14 @@ class WatermarkModule(Observer):
                 self._busy = False
                 self._worker = None
             self._publish("WATERMARK_BUSY", {"busy": False})
+            log.info("watermarkModule",
+                     f"后台线程结束(耗时 {time.time() - t0:.1f}s)")
 
     def _start_process(self, content):
         """校验并启动后台处理线程(互斥, 忙时拒绝)"""
         with self._lock:
             if self._busy:
+                log.warn("watermarkModule", "已有任务在处理中, 拒绝新任务")
                 self._publish("WATERMARK_RESULT", {
                     "success": False,
                     "msg": "已有任务在处理中, 请等待完成或取消",
@@ -116,6 +124,7 @@ class WatermarkModule(Observer):
                 return
             input_path = content.get("input", "")
             if not input_path or not os.path.isfile(input_path):
+                log.error("watermarkModule", f"输入文件不存在: {input_path}")
                 self._publish("WATERMARK_RESULT", {
                     "success": False,
                     "msg": f"输入文件不存在: {input_path}",
@@ -129,6 +138,11 @@ class WatermarkModule(Observer):
             self._worker = threading.Thread(target=self._do_process,
                                             args=(content,), daemon=True)
             self._worker.start()
+            log.info("watermarkModule",
+                     f"新任务受理: {content.get('input', '')} "
+                     f"(mode={content.get('mode', 'static')}, "
+                     f"quality={content.get('quality', '默认')}, "
+                     f"use_gpu={content.get('use_gpu', '默认')})")
         self._publish("WATERMARK_BUSY", {"busy": True})
 
     # ============================================================
@@ -142,10 +156,12 @@ class WatermarkModule(Observer):
         :return: None
         """
         if event == "WATERMARK_PROCESS_REQUEST":
+            log.info("watermarkModule", f"收到处理请求: {content}")
             self._start_process(content)
 
         elif event == "WATERMARK_CANCEL_REQUEST":
             # 取消当前处理(线程内每帧检查取消事件)
+            log.info("watermarkModule", "收到取消请求")
             self._cancel_event.set()
             self._publish("WATERMARK_PROGRESS",
                           {"percent": 0, "info": "正在取消..."})
@@ -155,9 +171,10 @@ class WatermarkModule(Observer):
             import watermarkConfig
             self._publish("WATERMARK_CONFIG_RESULT",
                           {"config": watermarkConfig.load()})
+            log.debug("watermarkModule", "已回复配置查询")
 
         else:
-            print(f"[WatermarkModule] 未处理事件: {event}: {content}")
+            log.warn("watermarkModule", f"未处理事件: {event}: {content}")
 
     # ============================================================
     # 事件发布(经中心调度通知观察者, 如 UI)

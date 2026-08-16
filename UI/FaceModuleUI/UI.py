@@ -1647,9 +1647,9 @@ class WatermarkPage(QWidget):
             self.input_edit.setText(path)
 
     def _on_browse_output(self):
-        """选择输出视频保存位置"""
-        path, _ = QFileDialog.getSaveFileName(self, get_text("watermark.output"),
-                                              "", self._VIDEO_FILTER)
+        """选择输出文件夹(输出文件名自动生成)"""
+        path = QFileDialog.getExistingDirectory(
+            self, get_text("watermark.output"), "")
         if path:
             self.output_edit.setText(path)
 

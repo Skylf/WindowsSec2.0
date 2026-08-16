@@ -12,6 +12,8 @@
 import cv2
 import numpy as np
 
+import log
+
 
 # ====================================================================
 # 静态水印: 时域中值自动检测
@@ -26,18 +28,27 @@ def detectStaticMask(video_path, sample_frames=30, threshold=15,
     :param progress_callback: 进度回调(frame_index, total)
     :return: 水印 mask<np.ndarray uint8>(0/255, 与视频同尺寸), 失败返回 None
     """
+    log.info("watermarkDetector", f"开始静态水印检测: {video_path} "
+                                  f"(采样 {sample_frames} 帧, 阈值 {threshold})")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"[watermarkDetector] 无法打开视频: {video_path}")
+        log.error("watermarkDetector", f"无法打开视频: {video_path}")
         return None
+
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    log.info("watermarkDetector",
+             f"视频信息: {w}x{h}, {fps:.2f}fps, 总帧数 {total}")
 
     # 读取 N 帧(灰度)
     frames = []
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     count = min(sample_frames, total) if total > 0 else sample_frames
     for i in range(count):
         ret, frame = cap.read()
         if not ret:
+            log.warn("watermarkDetector", f"第 {i} 帧读取失败, 提前结束采样")
             break
         frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
         if progress_callback:
@@ -45,15 +56,19 @@ def detectStaticMask(video_path, sample_frames=30, threshold=15,
     cap.release()
 
     if len(frames) < 5:
-        print("[watermarkDetector] 采样帧不足, 无法检测")
+        log.error("watermarkDetector", f"采样帧不足({len(frames)}), 无法检测")
         return None
 
     # 中值帧: 背景逐帧变化取中值, 水印静止保持原样
+    log.debug("watermarkDetector", f"采样完成 {len(frames)} 帧, 计算时域中值帧...")
     stack = np.stack(frames).astype(np.float32)   # (N, H, W)
     median = np.median(stack, axis=0).astype(np.uint8)
     # 与首帧的差异: 水印区差异小(静止), 背景区差异大
     diff = cv2.absdiff(frames[0], median)
     mask = (diff < threshold).astype(np.uint8) * 255
+    raw_ratio = float(mask.mean() / 255.0)
+    log.debug("watermarkDetector",
+              f"原始静止区占比 {raw_ratio * 100:.2f}%(阈值 {threshold})")
 
     # 形态学清理: 去噪点 + 闭合空洞
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -64,9 +79,18 @@ def detectStaticMask(video_path, sample_frames=30, threshold=15,
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     clean = np.zeros_like(mask)
     min_area = mask.shape[0] * mask.shape[1] * 0.0005   # 0.05% 面积
+    kept = 0
     for c in contours:
-        if cv2.contourArea(c) >= min_area:
+        area = cv2.contourArea(c)
+        if area >= min_area:
             cv2.drawContours(clean, [c], -1, 255, -1)
+            kept += 1
+    final_ratio = float(clean.mean() / 255.0)
+    bbox = bboxFromMask(clean)
+    log.info("watermarkDetector",
+             f"检测完成: 轮廓 {len(contours)} 个, 保留 {kept} 个(最小面积 "
+             f"{min_area:.0f}px), 最终水印占比 {final_ratio * 100:.2f}%, "
+             f"区域 {bbox}")
     return clean
 
 
@@ -113,6 +137,7 @@ def trackWatermark(frame, template, search_margin=20, last_bbox=None):
     th, tw = template.shape[:2]
     fh, fw = frame.shape[:2]
     if th >= fh or tw >= fw:
+        log.debug("watermarkDetector", f"模板({th}x{tw})大于帧({fh}x{fw}), 放弃跟踪")
         return None
     try:
         # 纯色/近纯色水印(如台标、压缩噪声)时 CCOEFF_NORMED 只测到噪声相关性,
@@ -125,6 +150,8 @@ def trackWatermark(frame, template, search_margin=20, last_bbox=None):
             min_val, _, min_loc, _ = cv2.minMaxLoc(res_s)
             res_c = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(res_c)
+            log.debug("watermarkDetector",
+                      f"模板匹配得分 SQDIFF={min_val:.4f} CCOEFF={max_val:.4f}")
             if min_val is not None and not np.isnan(float(min_val)) and float(min_val) < 0.10:
                 return min_loc[0] + ox, min_loc[1] + oy
             if max_val is not None and not np.isnan(float(max_val)) and float(max_val) >= 0.5:
@@ -141,13 +168,17 @@ def trackWatermark(frame, template, search_margin=20, last_bbox=None):
                 if found is not None:
                     x, y = found
                     return x, y, x + tw, y + th
+            log.debug("watermarkDetector",
+                      f"邻域搜索未命中(上帧 {last_bbox}), 回退全帧搜索")
             # 邻域未命中 → 回退全帧搜索(容忍水印跳变)
         found = _best_in(frame, 0, 0)
         if found is None:
+            log.warn("watermarkDetector", "全帧搜索未命中, 水印疑似丢失")
             return None
         x, y = found
         return x, y, x + tw, y + th
-    except cv2.error:
+    except cv2.error as e:
+        log.error("watermarkDetector", f"模板匹配异常: {e}")
         return None
 
 
@@ -172,15 +203,27 @@ class WatermarkMasker:
         self._template = template
         self._bbox = bbox
         self._last_bbox = None   # 动态跟踪: 上一帧水印位置
+        # 动态跟踪统计(排查跟踪丢失用)
+        self._track_total = 0
+        self._track_hit = 0
+        self._track_miss = 0
         if mask is not None:
             self._static_mask = mask
+            log.info("watermarkMasker", "静态模式: 使用自动检测 mask")
         elif bbox is not None and frame_shape is not None:
             h, w = frame_shape[:2]
             self._static_mask = np.zeros((h, w), dtype=np.uint8)
             x1, y1, x2, y2 = [int(v) for v in bbox]
             self._static_mask[y1:y2, x1:x2] = 255
+            log.info("watermarkMasker",
+                     f"静态模式: 手动指定水印区域 {bbox}(帧 {w}x{h})")
         else:
             self._static_mask = None
+            log.warn("watermarkMasker", "静态模式: 无 mask/bbox, 全流程将原样复制")
+        if mode == "dynamic":
+            log.info("watermarkMasker",
+                     f"动态模式: 模板 {template.shape[1]}x{template.shape[0]}, "
+                     f"邻域搜索边距 20px, 混合评分(SQDIFF/CCOEFF)")
 
     def getMask(self, frame, frame_index=0):
         """
@@ -195,11 +238,29 @@ class WatermarkMasker:
         if self._template is None or frame is None:
             return None
         bbox = trackWatermark(frame, self._template, last_bbox=self._last_bbox)
+        self._track_total += 1
         if bbox is None:
+            self._track_miss += 1
+            if self._track_miss <= 3 or self._track_miss % 50 == 0:
+                log.warn("watermarkMasker",
+                         f"跟踪丢失 #{self._track_miss}(第 {frame_index} 帧)")
             return None
+        self._track_hit += 1
         self._last_bbox = bbox
+        log.debug("watermarkMasker",
+                  f"第 {frame_index} 帧跟踪命中: {bbox}")
         h, w = frame.shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
         x1, y1, x2, y2 = bbox
         mask[y1:y2, x1:x2] = 255
         return mask
+
+    def trackStats(self) -> dict:
+        """
+        动态跟踪统计(处理结束后调用)
+        :return: {"total": int, "hit": int, "miss": int, "hit_rate": float}
+        """
+        rate = (self._track_hit / self._track_total * 100
+                if self._track_total else 0.0)
+        return {"total": self._track_total, "hit": self._track_hit,
+                "miss": self._track_miss, "hit_rate": round(rate, 1)}

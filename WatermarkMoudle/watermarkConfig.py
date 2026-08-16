@@ -8,6 +8,9 @@
 import json
 import os
 
+import log
+
+
 # 配置文件(本地持久化, 用户设置保留; 不入 git)
 _CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "watermark_config.json")
@@ -45,8 +48,12 @@ def load():
                 saved = json.load(f)
             if isinstance(saved, dict):
                 _config.update(saved)
+            log.info("watermarkConfig", f"已加载配置: {_CONFIG_FILE}")
+            log.debug("watermarkConfig", f"配置内容: {_config}")
+        else:
+            log.info("watermarkConfig", f"无配置文件, 使用默认配置: {_CONFIG_FILE}")
     except (OSError, json.JSONDecodeError) as e:
-        print(f"[watermarkConfig] 读取配置失败, 使用默认: {e}")
+        log.error("watermarkConfig", f"读取配置失败, 使用默认: {e}")
     return _config
 
 
@@ -58,23 +65,28 @@ def save():
     try:
         with open(_CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(_config, f, ensure_ascii=False, indent=2)
+        log.info("watermarkConfig", f"配置已保存: {_CONFIG_FILE}")
     except OSError as e:
-        print(f"[watermarkConfig] 保存配置失败: {e}")
+        log.error("watermarkConfig", f"保存配置失败: {e}")
 
 
 def get(key):
     """读取配置项"""
-    return load().get(key, DEFAULT_CONFIG.get(key))
+    value = load().get(key, DEFAULT_CONFIG.get(key))
+    log.debug("watermarkConfig", f"get({key}) = {value}")
+    return value
 
 
 def set(key, value):
     """设置配置项并保存"""
     cfg = load()
     if key in cfg:
+        old = cfg[key]
         cfg[key] = value
         save()
+        log.info("watermarkConfig", f"配置变更: {key} = {value}(原 {old})")
     else:
-        print(f"[watermarkConfig] 未知配置项: {key}")
+        log.error("watermarkConfig", f"未知配置项: {key}")
 
 
 def getUseGpu() -> str:

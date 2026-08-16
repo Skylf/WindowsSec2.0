@@ -19,6 +19,7 @@ import threading
 # 保证直接运行时可导入同目录模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import log
 import watermarkConfig
 import gpuDetector
 from videoProcessor import removeWatermark, buildOutputPath
@@ -39,17 +40,18 @@ def runOnce(args):
 
     print("=" * 56)
     print(f"输入: {input_path}")
-    print(f"模式: {args.mode} | 质量: {args.quality} | GPU: {args.gpu}")
+    print(f"模式: {args.mode} | 质量: {args.quality or '默认'} | GPU: {args.gpu or '默认'}")
     print("=" * 56)
 
-    # 进度显示
-    last_percent = -1
+    # 进度显示(整行里程碑, 避免 \r 与日志行互相覆盖)
+    last_milestone = -1
 
     def on_progress(percent, info):
-        nonlocal last_percent
-        if percent != last_percent or percent >= 100:
-            last_percent = percent
-            print(f"\r[{percent:3d}%] {info}", end="", flush=True)
+        nonlocal last_milestone
+        pct = int(percent)
+        if pct != last_milestone and (pct % 10 == 0 or pct >= 100):
+            last_milestone = pct
+            log.info("runTest", f"[进度 {pct:3d}%] {info}")
 
     cancel_event = threading.Event()
     result = removeWatermark(
@@ -110,7 +112,7 @@ def interactive():
                 or cfg.get("quality")
             gpu = input(f"GPU [auto/on/off] (回车={cfg.get('use_gpu')}): ").strip() \
                 or cfg.get("use_gpu")
-            output = input("输出路径 (回车=自动生成): ").strip().strip('"') or None
+            output = input("输出路径或文件夹 (回车=自动生成): ").strip().strip('"') or None
 
             print(f"\n开始处理: {path} ({mode}/{quality}/{gpu})...")
             result = removeWatermark(path, output_path=output, mode=mode,
@@ -158,11 +160,17 @@ def main():
                         help="修复质量(默认取配置)")
     parser.add_argument("--gpu", choices=["auto", "on", "off"], default=None,
                         help="GPU 开关(默认取配置)")
-    parser.add_argument("--output", help="输出路径(默认输入同目录加后缀)")
+    parser.add_argument("--output", help="输出文件路径或输出文件夹(默认输入同目录加后缀)")
     parser.add_argument("--bbox", type=lambda s: tuple(int(v) for v in
                         s.replace("(", "").replace(")", "").split(",")),
                         help="手动水印区域 x1,y1,x2,y2(跳过自动检测)")
+    parser.add_argument("--debug", action="store_true",
+                        help="输出 DEBUG 级详细日志(模板匹配得分/逐帧跟踪等)")
     args = parser.parse_args()
+
+    if args.debug:
+        log.set_debug(True)
+        log.info("runTest", "DEBUG 日志已开启(WM_DEBUG=1)")
 
     if args.once:
         return runOnce(args)

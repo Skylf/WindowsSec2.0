@@ -11,6 +11,8 @@ GPU 资源检测(gpuDetector)
 
 import onnxruntime as ort
 
+import log
+
 
 def detectGpu() -> dict:
     """
@@ -21,17 +23,21 @@ def detectGpu() -> dict:
         "detail": str,            # 人类可读说明
     }
     """
+    log.debug("gpuDetector", f"onnxruntime 版本: {ort.__version__}")
     try:
         providers = ort.get_available_providers()
+        log.info("gpuDetector", f"ONNX Runtime 可用 providers: {providers}")
     except Exception as e:
         providers = []
-        print(f"[gpuDetector] 获取 providers 失败: {e}")
+        log.error("gpuDetector", f"获取 providers 失败: {e}")
     cuda = "CUDAExecutionProvider" in providers
     if cuda:
         detail = "检测到 CUDA 可用(onnxruntime-gpu), 推理可用 GPU 加速"
+        log.info("gpuDetector", "CUDA 可用(onnxruntime-gpu 已安装)")
     else:
         detail = ("仅 CPU 可用。如需 GPU 加速: 1) 需 NVIDIA 显卡 2) 安装 "
                   "onnxruntime-gpu(pip install onnxruntime-gpu)")
+        log.info("gpuDetector", "CUDA 不可用, 仅 CPU 推理")
     return {"cuda_available": cuda, "providers": providers, "detail": detail}
 
 
@@ -45,15 +51,19 @@ def getOnnxProviders(use_gpu="auto") -> list:
     cuda = info["cuda_available"]
 
     if use_gpu == "off":
+        log.info("gpuDetector", "GPU 开关=off, 强制 CPU")
         return ["CPUExecutionProvider"]
     if use_gpu == "on":
         if cuda:
+            log.info("gpuDetector", "GPU 开关=on, 使用 CUDA")
             return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        print("[gpuDetector] 开关为 on 但 CUDA 不可用, 回退 CPU")
+        log.warn("gpuDetector", "开关为 on 但 CUDA 不可用, 回退 CPU")
         return ["CPUExecutionProvider"]
     # auto: 可用则用
     if cuda:
+        log.info("gpuDetector", "GPU 开关=auto, CUDA 可用 → 使用 GPU")
         return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    log.info("gpuDetector", "GPU 开关=auto, CUDA 不可用 → 使用 CPU")
     return ["CPUExecutionProvider"]
 
 
