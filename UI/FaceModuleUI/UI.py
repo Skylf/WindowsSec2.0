@@ -1886,6 +1886,11 @@ class WatermarkPage(QWidget):
         self.quality_combo = QComboBox()
         for key, value in self._QUALITY_OPTIONS:
             self.quality_combo.addItem(get_text(key), value)
+        self.quality_combo.currentIndexChanged.connect(self._on_quality_changed)
+        self.quality_hint_label = QLabel("")
+        self.quality_hint_label.setObjectName("hintLabel")
+        self.quality_hint_label.setWordWrap(True)
+        self._on_quality_changed(self.quality_combo.currentIndex())
         self.gpu_combo = QComboBox()
         for key, value in self._GPU_OPTIONS:
             self.gpu_combo.addItem(get_text(key), value)
@@ -1913,7 +1918,7 @@ class WatermarkPage(QWidget):
         layout.addLayout(self._field_row("watermark.output", self.output_edit, output_btn))
         layout.addSpacing(4)
         layout.addLayout(self._combo_row("watermark.mode", self.mode_combo))
-        layout.addLayout(self._combo_row("watermark.quality", self.quality_combo))
+        layout.addLayout(self._quality_row())
         layout.addLayout(self._combo_row("watermark.gpu", self.gpu_combo))
         layout.addLayout(self._bbox_row())
         layout.addStretch(1)
@@ -1944,6 +1949,27 @@ class WatermarkPage(QWidget):
         row.addStretch(1)
         row.addWidget(combo)
         return row
+
+    def _quality_row(self) -> QVBoxLayout:
+        """修复质量: 下拉 + 适用情景/速度说明"""
+        row = QVBoxLayout()
+        row.addLayout(self._combo_row("watermark.quality", self.quality_combo))
+        row.addWidget(self.quality_hint_label)
+        return row
+
+    def _on_quality_changed(self, index):
+        """修复质量切换 → 更新适用情景/速度提示"""
+        quality = self.quality_combo.itemData(index)
+        if quality == "lama":
+            self.quality_hint_label.setText(
+                get_text("watermark.quality.lama.hint"))
+            self.quality_combo.setToolTip(
+                get_text("watermark.quality.lama.hint"))
+        else:
+            self.quality_hint_label.setText(
+                get_text("watermark.quality.fast.hint"))
+            self.quality_combo.setToolTip(
+                get_text("watermark.quality.fast.hint"))
 
     def _bbox_row(self) -> QVBoxLayout:
         row = QVBoxLayout()
@@ -2025,7 +2051,7 @@ class WatermarkPage(QWidget):
             self.status_label.setText(get_text("watermark.status.fail", "未绑定 UiRsp"))
 
     def _log_start(self, input_path, output_path, manual_bbox):
-        """启动日志: 记录本次任务的参数摘要"""
+        """启动日志: 记录本次任务的参数摘要(带阶段标签)"""
         mode = self.mode_combo.currentData()
         quality = self.quality_combo.currentData()
         gpu = self.gpu_combo.currentData()
@@ -2039,9 +2065,11 @@ class WatermarkPage(QWidget):
         else:
             region = "自动检测"
         self._append_log(get_text("watermark.log.start",
-                                  os.path.basename(input_path),
-                                  quality, gpu, region, mode))
-        self._append_log(get_text("watermark.log.output", output_path or "自动生成"))
+                                  os.path.basename(input_path)), "start")
+        self._append_log(get_text(
+            "watermark.log.params", quality, gpu, region, mode), "start")
+        self._append_log(get_text("watermark.log.output", output_path or "自动生成"),
+                         "start")
 
     def _parse_bbox(self):
         """
@@ -2082,6 +2110,28 @@ class WatermarkPage(QWidget):
     # ============================================================
     # 结果联动(连接主窗口信号, 主线程执行)
     # ============================================================
+    # 阶段推断: 从进度信息文本识别当前处理阶段(日志标签用)
+    @staticmethod
+    def _stage_of(info):
+        if any(k in info for k in ("开始处理", "参数:", "输出:")):
+            return "start"
+        if any(k in info for k in ("视频信息", "采样")):
+            return "sample"
+        if any(k in info for k in ("定位完成", "检测到水印", "未检测到",
+                                   "水印 mask", "命中")):
+            return "analyze"
+        if "细化" in info:
+            return "refine"
+        if any(k in info for k in ("加载", "模型", "降级", "引擎")):
+            return "engine"
+        if any(k in info for k in ("处理中", "开始逐帧")):
+            return "process"
+        if any(k in info for k in ("处理完成", "总耗时")):
+            return "done"
+        if any(k in info for k in ("失败", "取消")):
+            return "fail"
+        return "info"
+
     def _on_progress(self, progress_data):
         """处理进度 → 进度条(含 ETA) + 状态 + 阶段日志"""
         percent = int(progress_data.get("percent", 0))
@@ -2089,11 +2139,16 @@ class WatermarkPage(QWidget):
         self.progress_bar.setValue(percent)
         self.status_label.setText(
             get_text("watermark.status.processing", percent, info))
-        # 阶段日志: 每 10% 或 info 变化时追加(避免每帧刷屏)
-        if percent != getattr(self, "_last_log_pct", -1) \
-                and (percent % 10 == 0 or percent >= 100):
+        # 阶段日志: 每 10% 里程碑 或 阶段切换 时追加(避免每帧刷屏)
+        stage = self._stage_of(info)
+        last_stage = getattr(self, "_last_log_stage", None)
+        last_pct = getattr(self, "_last_log_pct", -1)
+        if (percent % 10 == 0 or percent >= 100) and percent != last_pct:
             self._last_log_pct = percent
-            self._append_log(info)
+            self._append_log(info, stage)
+        elif stage != last_stage and stage not in ("info",):
+            self._last_log_stage = stage
+            self._append_log(info, stage)
         # ETA 测算
         self._update_eta(percent, info)
 
@@ -2128,10 +2183,19 @@ class WatermarkPage(QWidget):
             return f"{h}小时{m}分"
         return f"{m}分{s}秒"
 
-    def _append_log(self, text):
-        """追加一行带时间戳的处理日志"""
+    def _append_log(self, text, stage="info"):
+        """追加一行带时间戳/阶段标签/阶段耗时的处理日志"""
         ts = time.strftime("%H:%M:%S", time.localtime())
-        self.log_text.appendPlainText(f"[{ts}] {text}")
+        now = time.time()
+        suffix = ""
+        last_ts = getattr(self, "_last_log_ts", None)
+        if last_ts is not None:
+            delta = now - last_ts
+            if delta >= 0.05:
+                suffix = f" (+{delta:.1f}s)"
+        self._last_log_ts = now
+        stage_name = get_text(f"watermark.log.stage.{stage}")
+        self.log_text.appendPlainText(f"[{ts}] [{stage_name}] {text}{suffix}")
 
     def _on_result(self, result_data):
         """处理结果 → 进度条复位 + 结果文本 + 日志"""
@@ -2139,7 +2203,7 @@ class WatermarkPage(QWidget):
             # 用户取消(与失败区分)
             self.status_label.setText(get_text("watermark.status.cancelled"))
             self.result_text.appendPlainText(get_text("watermark.result.cancelled"))
-            self._append_log(get_text("watermark.log.cancelled"))
+            self._append_log(get_text("watermark.log.cancelled"), "fail")
         elif result_data.get("success"):
             self.status_label.setText(
                 get_text("watermark.status.done", result_data.get("output_path", "")))
@@ -2157,8 +2221,13 @@ class WatermarkPage(QWidget):
             elapsed = result_data.get("elapsed_s")
             self._append_log(get_text(
                 "watermark.log.done",
-                result_data.get("output_path", ""),
-                self._fmt_eta(elapsed) if elapsed else "?"))
+                self._fmt_eta(elapsed) if elapsed else "?",
+                result_data.get("avg_ms", 0),
+                result_data.get("frames", 0),
+                result_data.get("mode", ""),
+                result_data.get("watermark_bbox", "-"),
+                result_data.get("note", ""),
+                result_data.get("output_path", "")), "done")
             # 去不干净排查提示
             if result_data.get("mode") == "fast":
                 self._append_log(get_text("watermark.log.hint_fast"))
@@ -2170,7 +2239,7 @@ class WatermarkPage(QWidget):
             self.result_text.appendPlainText(
                 get_text("watermark.status.fail", result_data.get("msg", "")))
             self._append_log(get_text("watermark.log.fail",
-                                      result_data.get("msg", "")))
+                                      result_data.get("msg", "")), "fail")
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
 
@@ -2185,6 +2254,8 @@ class WatermarkPage(QWidget):
         if busy:
             self._process_start = time.time()
             self._last_log_pct = -1
+            self._last_log_stage = None
+            self._last_log_ts = None
 
 
 # ====================================================================

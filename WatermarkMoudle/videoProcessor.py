@@ -107,9 +107,10 @@ def prepareMasker(video_path, mode="static", manual_bbox=None,
         boxes = normalizeBoxes(manual_bbox)
         if not boxes:
             raise IOError("手动水印区域为空")
-        # 逐框细化(方差法收紧到水印像素本体), 并集生成 mask
+        # 逐框细化(方差法+中值法收紧到水印像素本体), 并集生成 mask
         if progress_callback:
-            progress_callback(8, f"细化水印区域(方差法, {len(boxes)} 块)...")
+            progress_callback(8, f"正在细化水印区域(方差法+中值法, "
+                                 f"{len(boxes)} 块)...")
         union_mask = np.zeros(first_frame.shape[:2], dtype=np.uint8)
         refined_boxes = []
         refined_count = 0
@@ -126,18 +127,29 @@ def prepareMasker(video_path, mode="static", manual_bbox=None,
                 refined_count += 1
                 log.info("videoProcessor",
                          f"框 {i + 1} 细化成功: {bboxFromMask(refined)}")
+                if progress_callback:
+                    progress_callback(10 + i * 8,
+                                      f"第 {i + 1}/{len(boxes)} 块细化完成: "
+                                      f"{bboxFromMask(refined)}")
             else:
                 x1, y1, x2, y2 = box
                 union_mask[y1:y2, x1:x2] = 255
                 refined_boxes.append(box)
                 log.warn("videoProcessor",
                          f"框 {i + 1} 细化失败, 回退矩形: {box}")
+                if progress_callback:
+                    progress_callback(10 + i * 8,
+                                      f"第 {i + 1}/{len(boxes)} 块细化失败, "
+                                      f"回退矩形 {box}")
         if union_mask.any():
             masker = WatermarkMasker(mode="static", mask=union_mask)
             note = (f"手动指定水印区域({len(boxes)} 块, "
                     f"{refined_count} 块已细化)")
             log.info("videoProcessor",
                      f"手动区域并集: {bboxFromMask(union_mask)}, {note}")
+            if progress_callback:
+                progress_callback(20, f"并集水印 mask 生成完成: "
+                                      f"{bboxFromMask(union_mask)}")
             return masker, bboxFromMask(union_mask), note
         masker = WatermarkMasker(mode="static", bbox=boxes[0],
                                  frame_shape=first_frame.shape)
@@ -146,7 +158,8 @@ def prepareMasker(video_path, mode="static", manual_bbox=None,
 
     # 自动检测(组合: 中值法+方差法, 覆盖不透明/半透明水印)
     if progress_callback:
-        progress_callback(5, "自动检测水印位置(中值+方差组合法)...")
+        progress_callback(5, f"视频信息: {w}x{h} @{fps:.2f}fps, 总帧数 {total}")
+        progress_callback(6, "正在采样帧并分析水印位置(中值法+方差法)...")
     inner_cb = None
     if progress_callback:
         def inner_cb(i, n):
@@ -224,6 +237,9 @@ def processVideo(input_path, output_path, masker, inpainter,
     log.info("videoProcessor",
              f"开始处理: {input_path} → {output_path} "
              f"({total} 帧, {w}x{h}, {fps:.2f}fps, 引擎 {inpainter.mode()})")
+    if progress_callback:
+        progress_callback(31, f"开始逐帧处理: {total} 帧 | {w}x{h} | "
+                              f"引擎 {inpainter.mode()} | 预计处理中...")
 
     frames = 0
     repaired = 0
@@ -329,13 +345,17 @@ def removeWatermark(input_path, output_path=None, mode="static",
 
     # 2. 修复引擎
     if progress_callback:
-        progress_callback(30, f"加载修复引擎({quality})...")
+        if quality == "lama":
+            progress_callback(30, "正在加载 LaMa AI 模型(神经网络修复引擎)...")
+        else:
+            progress_callback(30, "正在加载 OpenCV 修复引擎(Telea 快速算法)...")
     inpainter = Inpainter(mode=quality, use_gpu=use_gpu)
     if inpainter.mode() != quality:
         log.warn("videoProcessor",
                  f"引擎降级: 请求 {quality} → 实际 {inpainter.mode()}")
         if progress_callback:
-            progress_callback(30, f"引擎降级为 {inpainter.mode()}")
+            progress_callback(30, f"⚠ 引擎降级: 请求 {quality} → "
+                                  f"实际 {inpainter.mode()}")
 
     # 3. 处理视频
     result = processVideo(input_path, out_path, masker, inpainter,

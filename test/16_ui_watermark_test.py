@@ -54,12 +54,12 @@ def makeVideo(path, frames=60, size=(320, 240)):
 
 
 def waitResult(app, page, timeout=60.0):
-    """等待处理结果(状态标签出现 完成/失败/取消)"""
+    """等待处理结果(状态标签出现 处理完成/处理失败/已取消)"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         app.processEvents()
         text = page.status_label.text()
-        if any(k in text for k in ("完成", "失败", "已取消")):
+        if any(k in text for k in ("处理完成", "处理失败", "已取消")):
             return text
         time.sleep(0.02)
     return page.status_label.text()
@@ -131,12 +131,14 @@ def main():
     out_path = os.path.join(tmp, "demo_nowm.mp4")
     assert os.path.isfile(out_path), "输出视频应存在"
     assert page.start_btn.isEnabled(), "完成后开始按钮应恢复"
-    # 处理日志: 应包含开始/阶段/完成信息
+    # 处理日志: 应包含启动/阶段/完成信息(带阶段标签)
     log = page.log_text.toPlainText()
-    assert "开始处理" in log, f"日志应含开始信息: {log}"
+    assert "任务开始" in log, f"日志应含启动信息: {log}"
+    assert "[启动]" in log, f"日志应含启动阶段标签: {log}"
+    assert "[处理]" in log, f"日志应含处理阶段标签: {log}"
     assert "处理完成" in log, f"日志应含完成信息: {log}"
     assert page.progress_bar.format() == "%p%", "完成后 ETA 应复位"
-    print(f"  ✓ 处理完成 → 输出文件存在 + 日志区正常({len(log.splitlines())} 行)")
+    print(f"  ✓ 处理完成 → 输出文件存在 + 详细日志正常({len(log.splitlines())} 行)")
 
     print("[5] 手动指定水印区域(蒙太奇/半透明水印场景的可靠路径)")
     small = os.path.join(tmp, "manual.mp4")
