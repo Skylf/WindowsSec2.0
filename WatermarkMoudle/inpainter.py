@@ -141,13 +141,18 @@ class Inpainter:
         动态尺寸模型: 整帧 pad 到 8 的倍数推理。
         """
         h, w = frame.shape[:2]
+        # LaMa 协议: 输入图像中 mask 区域必须置空(置 0), 且必须在裁剪/反射填充
+        # 之前作用于整帧 —— 否则 BORDER_REFLECT_101 会把水印文字镜像进填充区,
+        # 模型看到文字模式会原样重建文字
+        frame = frame.copy()
+        frame[mask > 0] = 0
         if self._fixed_size is not None:
             th, tw = self._fixed_size
             # ── 固定尺寸模型: 水印区域裁剪推理(保留全分辨率质量) ──
             ys, xs = np.where(mask > 0)
             if len(xs) == 0:
                 return frame
-            margin = 32   # 水印四周上下文边距(LaMa 借周边结构生成)
+            margin = 64   # 水印四周上下文边距(LaMa 借周边结构生成; 大边距融合更好)
             x1 = max(0, int(xs.min()) - margin)
             y1 = max(0, int(ys.min()) - margin)
             x2 = min(w, int(xs.max()) + 1 + margin)
@@ -178,6 +183,11 @@ class Inpainter:
             msk = cv2.copyMakeBorder(mask, 0, pad_h, 0, pad_w,
                                      cv2.BORDER_CONSTANT, value=0)
             crop_out_h, crop_out_w = h + pad_h, w + pad_w
+
+        # LaMa 协议: 输入图像中 mask 区域必须置空(置 0),
+        # 否则模型会把可见的原始内容(如水印文字)原样保留
+        img = img.copy()
+        img[msk > 0] = 0
 
         img_t = img.astype(np.float32) / 255.0
         img_t = img_t.transpose(2, 0, 1)[np.newaxis, ...]      # (1,3,H,W)

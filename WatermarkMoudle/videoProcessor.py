@@ -13,8 +13,9 @@ import cv2
 
 import log
 import watermarkConfig
-from watermarkDetector import (detectStaticMask, WatermarkMasker, cropTemplate,
-                               bboxFromMask, trackWatermark)
+from watermarkDetector import (detectWatermarkMask, refineMaskFromVideo,
+                               WatermarkMasker, cropTemplate, bboxFromMask,
+                               trackWatermark)
 from inpainter import Inpainter
 
 
@@ -85,32 +86,49 @@ def prepareMasker(video_path, mode="static", manual_bbox=None,
 
     # 手动指定水印区域
     if manual_bbox is not None:
+        # 框内自动细化: 方差法收紧到水印像素本体(文字笔画等),
+        # 只修复这些像素, 周边背景保持原样 → 修复痕迹更小
+        if progress_callback:
+            progress_callback(8, "细化水印区域(方差法)...")
+        refined = refineMaskFromVideo(
+            video_path, manual_bbox,
+            sample_frames=int(watermarkConfig.get("median_frames")),
+            variance_ratio=float(watermarkConfig.get("variance_ratio")),
+            noise_floor=float(watermarkConfig.get("noise_floor")))
+        if refined is not None:
+            masker = WatermarkMasker(mode="static", mask=refined)
+            log.info("videoProcessor",
+                     f"手动区域细化成功: {bboxFromMask(refined)}")
+            return masker, bboxFromMask(refined), \
+                f"手动指定水印区域(已细化 {bboxFromMask(refined)})"
         masker = WatermarkMasker(mode="static", bbox=manual_bbox,
                                  frame_shape=first_frame.shape)
         log.info("videoProcessor", f"手动指定水印区域: {manual_bbox}, 跳过自动检测")
         return masker, tuple(int(v) for v in manual_bbox), "手动指定水印区域"
 
-    # 自动检测(时域中值)
+    # 自动检测(组合: 中值法+方差法, 覆盖不透明/半透明水印)
     if progress_callback:
-        progress_callback(5, "自动检测水印位置(时域中值法)...")
+        progress_callback(5, "自动检测水印位置(中值+方差组合法)...")
     inner_cb = None
     if progress_callback:
         def inner_cb(i, n):
             progress_callback(int(5 + 25 * i / n), f"水印检测采样 {i}/{n}")
-    mask = detectStaticMask(
+    mask, detect_note = detectWatermarkMask(
         video_path,
         sample_frames=sample_frames or int(watermarkConfig.get("median_frames")),
         threshold=threshold if threshold is not None
         else int(watermarkConfig.get("median_threshold")),
+        variance_ratio=float(watermarkConfig.get("variance_ratio")),
+        noise_floor=float(watermarkConfig.get("noise_floor")),
         progress_callback=inner_cb)
     bbox = bboxFromMask(mask)
 
     if bbox is None:
         # 未检测到水印: 返回空 masker(全流程跳过修复, 原样复制)
-        log.warn("videoProcessor", "未检测到静态水印(全流程将原样复制)")
+        log.warn("videoProcessor", f"未检测到水印({detect_note})")
         if progress_callback:
-            progress_callback(30, "未检测到静态水印")
-        return WatermarkMasker(mode="static", mask=None), None, "未检测到静态水印"
+            progress_callback(30, f"未检测到水印({detect_note})")
+        return WatermarkMasker(mode="static", mask=None), None, detect_note
 
     if mode == "dynamic":
         # 动态模式: 用首帧水印区域做模板, 逐帧跟踪

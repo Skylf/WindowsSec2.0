@@ -27,6 +27,8 @@ DEFAULT_CONFIG = {
     "detect_method": "median",   # median(时域中值自动检测) / manual(手动坐标)
     "median_frames": 30,         # 时域中值采样帧数
     "median_threshold": 15,      # 静止判定阈值(0-255, 越小越严格)
+    "variance_ratio": 0.75,      # 半透明水印方差比(0-1, 越小越严格; 0.75≈α≥0.25)
+    "noise_floor": 4.0,          # 时域方差噪声底(低于此视为静止物体, 剔除)
 
     # ── 输出 ──
     "output_dir": "",            # 输出目录, 空 = 输入同目录

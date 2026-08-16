@@ -19,7 +19,7 @@ import log
 # 静态水印: 时域中值自动检测
 # ====================================================================
 # 面积过滤参数
-MIN_AREA_RATIO = 0.0005    # 最小静止块面积: 0.05% 帧面积(再小视为噪声)
+MIN_AREA_RATIO = 0.0001    # 最小静止块面积: 0.01% 帧面积(边缘先验已滤内部噪声, 可更小)
 MAX_AREA_RATIO = 0.15      # 最大静止块面积: 15% 帧面积(再大视为静止主体/背景)
 MAX_TOTAL_RATIO = 0.25     # 静止块总面积上限: 25%(超出视为整屏静止, 拒检)
 
@@ -154,6 +154,238 @@ def detectStaticMask(video_path, sample_frames=30, threshold=15,
              f"(面积 {min_area:.0f}~{max_area:.0f}px), 最终水印占比 "
              f"{kept_ratio * 100:.2f}%, 区域 {bbox}")
     return clean
+
+
+def _filterContours(mask):
+    """
+    轮廓面积过滤(过小=噪声, 过大=静止主体/背景)
+    :param mask: 原始候选 mask<np.ndarray uint8>
+    :return: (清理后 mask, 保留轮廓数, 保留面积占比)
+    """
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    clean = np.zeros_like(mask)
+    frame_area = mask.shape[0] * mask.shape[1]
+    min_area = frame_area * MIN_AREA_RATIO
+    max_area = frame_area * MAX_AREA_RATIO
+    kept = 0
+    kept_area = 0
+    for c in contours:
+        area = cv2.contourArea(c)
+        if min_area <= area <= max_area:
+            cv2.drawContours(clean, [c], -1, 255, -1)
+            kept += 1
+            kept_area += area
+    ratio = kept_area / frame_area if frame_area else 0.0
+    return clean, kept, ratio
+
+
+def _edgePrior(mask, zone_ratio=0.12):
+    """
+    边缘先验: 只保留与画面边缘带相交的候选块
+    视频水印(台标/角标/半透明文字)几乎总在边缘 12% 带内,
+    画面内部的静止物/低方差区域多为内容, 直接剔除。
+    :param mask: 候选 mask<np.ndarray uint8>
+    :param zone_ratio: 边缘带宽度占比(0-1)
+    :return: 过滤后的 mask<np.ndarray uint8>
+    """
+    h, w = mask.shape
+    zone = max(24, int(min(h, w) * zone_ratio))
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    out = np.zeros_like(mask)
+    kept = 0
+    for i in range(1, num):
+        bx, by, bw, bh = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], \
+                         stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        if bx < zone or by < zone or bx + bw > w - zone or by + bh > h - zone:
+            out[labels == i] = 255
+            kept += 1
+    log.debug("watermarkDetector",
+              f"边缘先验: {num - 1} 个候选块 → 保留 {kept} 个(边缘带 {zone}px)")
+    return out
+
+
+# ====================================================================
+# 半透明水印: 时域方差法检测
+# ====================================================================
+def _varianceCandidates(stack, variance_ratio=0.75, noise_floor=4.0):
+    """
+    时域方差候选(核心统计): 噪声底 < std < 局部背景方差 × variance_ratio
+    半透明水印像素方差 = (1-α)²·σ_BG², 介于背景与静止物之间。
+    局部背景方差用大核均值滤波估计:
+      - 均值把 std 估计的采样波动平均掉(背景 ratio 稳定 ≈ 1, 不会误入)
+      - 文字像素占比小时对均值影响有限(文字 ratio 仍 ≈ 1-α < 阈值)
+      - 中值/最大值滤波分别会被密集文字污染 / 被估计噪声放大
+    :param stack: 灰度帧堆叠 (N,H,W) float32
+    :param variance_ratio: 方差比阈值(0-1)
+    :param noise_floor: 噪声底
+    :return: 候选 mask<np.ndarray bool>
+    """
+    std = np.std(stack, axis=0)
+    k = max(15, min(std.shape) // 24) | 1
+    kernel = np.ones((k, k), dtype=np.float32) / (k * k)
+    local_bg = cv2.filter2D(std, -1, kernel, borderType=cv2.BORDER_REFLECT)
+    return (std > noise_floor) & (std < local_bg * variance_ratio)
+
+
+def detectTransparentMask(video_path, sample_frames=30, variance_ratio=0.75,
+                          noise_floor=4.0, progress_callback=None):
+    """
+    时域方差法检测半透明水印 mask
+    原理: 半透明水印像素 = α·WM + (1-α)·BG, 其时域方差 = (1-α)²·σ_BG²
+      - 背景像素:   方差 ≈ 局部背景方差(σ_BG, 运动/场景变化)
+      - 半透明水印: 方差 = (1-α)²·σ_BG², 显著低于局部背景但仍高于噪声
+      - 静止物体:   方差 ≈ 0(低于噪声底)
+    判定: 噪声底 < 时域方差 < 局部背景方差 × variance_ratio → 水印候选
+    :param video_path: 视频路径<str>
+    :param sample_frames: 采样帧数<int>(均匀分布全片)
+    :param variance_ratio: 方差比阈值<float>(0-1, 越小越严格, 0.75≈α≥0.25)
+    :param noise_floor: 噪声底<float>(低于此方差视为静止物体, 剔除)
+    :param progress_callback: 进度回调(i, total)
+    :return: 水印 mask<np.ndarray uint8> 或 None
+    """
+    log.info("watermarkDetector",
+             f"开始半透明水印检测(方差法): {video_path} "
+             f"(采样 {sample_frames} 帧, 方差比 {variance_ratio}, "
+             f"噪声底 {noise_floor})")
+    frames, info = _sampleFrames(video_path, sample_frames, progress_callback)
+    if info is None or not frames or len(frames) < 5:
+        log.error("watermarkDetector", f"采样帧不足, 无法检测")
+        return None
+
+    stack = np.stack(frames).astype(np.float32)        # (N,H,W)
+    cand = _varianceCandidates(stack, variance_ratio, noise_floor)
+    mask = cand.astype(np.uint8) * 255
+    k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k5)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k5)
+    mask = _edgePrior(mask)
+
+    clean, kept, ratio = _filterContours(mask)
+    if kept == 0 or ratio > MAX_TOTAL_RATIO:
+        log.info("watermarkDetector", "方差法: 未检测到半透明水印")
+        return None
+    bbox = bboxFromMask(clean)
+    log.info("watermarkDetector",
+             f"方差法检测完成: 保留 {kept} 个区域, 占比 {ratio * 100:.2f}%, "
+             f"区域 {bbox}")
+    return clean
+
+
+# ====================================================================
+# 组合检测: 中值法(不透明) + 方差法(半透明) → 并集
+# ====================================================================
+def refineMaskFromVideo(video_path, bbox, sample_frames=20,
+                        variance_ratio=0.75, noise_floor=4.0,
+                        progress_callback=None):
+    """
+    手动框内水印 mask 细化(方差法)
+    用户圈定一个宽松区域后, 用时域方差把 mask 收紧到真正的水印像素
+    (文字笔画/图形本体), 只修复这些像素, 周边背景保持原样 → 修复痕迹更小。
+    :param video_path: 视频路径<str>
+    :param bbox: 手动圈定区域 (x1,y1,x2,y2)
+    :param sample_frames: 采样帧数<int>
+    :param variance_ratio: 方差比阈值<float>
+    :param noise_floor: 噪声底<float>
+    :param progress_callback: 进度回调(i, total)
+    :return: 细化后的 mask<np.ndarray uint8> 或 None(细化失败, 回退矩形)
+    """
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    if x2 <= x1 or y2 <= y1:
+        return None
+    log.info("watermarkDetector",
+             f"手动框细化: 区域 {bbox}(方差比 {variance_ratio}, 噪声底 {noise_floor})")
+    frames, info = _sampleFrames(video_path, sample_frames, progress_callback)
+    if info is None or not frames or len(frames) < 5:
+        return None
+    h, w = info["h"], info["w"]
+    # 外扩分析边距(水印边缘像素需要邻域上下文)
+    m = 16
+    ax1, ay1 = max(0, x1 - m), max(0, y1 - m)
+    ax2, ay2 = min(w, x2 + m), min(h, y2 + m)
+
+    stack = np.stack(frames).astype(np.float32)
+    std = np.std(stack, axis=0)
+    zone = std[ay1:ay2, ax1:ax2]
+    k = max(15, min(zone.shape) // 24) | 1
+    kernel = np.ones((k, k), dtype=np.float32) / (k * k)
+    local_bg = cv2.filter2D(zone, -1, kernel, borderType=cv2.BORDER_REFLECT)
+    cand = (zone > noise_floor) & (zone < local_bg * variance_ratio)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[ay1:ay2, ax1:ax2][cand] = 255
+    # 只保留落在用户框内的候选(外扩区仅用于方差估计)
+    outside = np.ones_like(mask, dtype=bool)
+    outside[y1:y2, x1:x2] = False
+    mask[outside] = 0
+    k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k5)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k5)
+    # 膨胀覆盖笔画边缘(半透明文字边缘像素方差特征不完整)
+    mask = cv2.dilate(mask, k5, iterations=2)
+
+    kept = int((mask > 0).sum())
+    if kept < max(50, (x2 - x1) * (y2 - y1) * 0.01):
+        log.warn("watermarkDetector",
+                 f"细化候选过少({kept}px), 回退矩形区域")
+        return None
+    log.info("watermarkDetector",
+             f"细化完成: {kept}px({kept / ((x2-x1)*(y2-y1)) * 100:.0f}% "
+             f"的框内区域), 区域 {bboxFromMask(mask)}")
+    return mask
+def detectWatermarkMask(video_path, sample_frames=30, threshold=15,
+                        variance_ratio=0.75, noise_floor=4.0,
+                        progress_callback=None):
+    """
+    组合水印检测(一次采样, 两种算法):
+      1. 中值法  → 不透明水印(静止像素)
+      2. 方差法  → 半透明水印(方差介于背景与噪声之间)
+    结果取并集, 覆盖 B 站/平台类半透明水印场景。
+    :return: (mask, 说明<str>) 或 (None, 说明)
+    """
+    log.info("watermarkDetector", f"开始组合水印检测: {video_path} "
+                                  f"(采样 {sample_frames} 帧)")
+    frames, info = _sampleFrames(video_path, sample_frames, progress_callback)
+    if info is None:
+        return None, "无法打开视频"
+    if not frames or len(frames) < 5:
+        return None, f"采样帧不足({len(frames)})"
+
+    stack = np.stack(frames).astype(np.float32)        # (N,H,W)
+    median = np.median(stack, axis=0).astype(np.uint8)
+    diff = cv2.absdiff(frames[0], median)
+    m_median = (diff < threshold).astype(np.uint8) * 255
+
+    std = np.std(stack, axis=0)
+    cand = _varianceCandidates(stack, variance_ratio, noise_floor)
+    m_var = cand.astype(np.uint8) * 255
+
+    k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    for m in (m_median, m_var):
+        m[:] = cv2.morphologyEx(m, cv2.MORPH_OPEN, k5)
+        m[:] = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k5)
+
+    # 边缘先验: 只保留边缘带内的候选块(台标/角标位置), 剔除内部误检
+    m_median = _edgePrior(m_median)
+    m_var = _edgePrior(m_var)
+
+    merged = cv2.bitwise_or(m_median, m_var)
+    clean, kept, ratio = _filterContours(merged)
+
+    notes = []
+    if m_median.any():
+        notes.append("中值法")
+    if m_var.any():
+        notes.append("方差法")
+    if kept == 0 or ratio > MAX_TOTAL_RATIO:
+        log.warn("watermarkDetector",
+                 f"组合检测无有效区域(中值法{'命中' if '中值法' in notes else '未命中'}"
+                 f", 方差法{'命中' if '方差法' in notes else '未命中'}), 拒绝")
+        return None, "未检测到水印"
+    bbox = bboxFromMask(clean)
+    log.info("watermarkDetector",
+             f"组合检测完成: 命中 {'+'.join(notes)}, 保留 {kept} 个区域, "
+             f"占比 {ratio * 100:.2f}%, 区域 {bbox}")
+    return clean, f"检测到水印区域 {bbox} ({'+'.join(notes)})"
 
 
 # ====================================================================
