@@ -77,7 +77,13 @@ def main():
         assert providers, f"{mode} 模式应返回 providers"
     off = gpuDetector.getOnnxProviders("off")
     assert off == ["CPUExecutionProvider"], "off 模式应仅 CPU"
-    print("  ✓ 开关解析正常(auto/on/off), off 强制 CPU")
+    # CUDA 开关一致性: auto/on 返回 CUDA 当且仅当实测验证通过
+    verified = gpuDetector.verifyCuda()
+    auto = gpuDetector.getOnnxProviders("auto")
+    assert ("CUDAExecutionProvider" in auto) == verified, \
+        f"auto 模式应与实测结果一致: auto={auto}, verified={verified}"
+    print(f"  ✓ 开关解析正常(auto/on/off), CUDA 实测={verified}, "
+          f"auto 实际: {'GPU' if 'CUDAExecutionProvider' in auto else 'CPU'}")
 
     print("[2] 静态水印自动检测(时域中值法)")
     static_video = os.path.join(tmp, "static.mp4")
