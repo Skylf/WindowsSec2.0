@@ -127,7 +127,11 @@ class Inpainter:
                 return self._inpaintLama(frame, mask)
             except Exception as e:
                 log.error("inpainter", f"LaMa 推理失败({e}), 本帧回退 fast")
-        return cv2.inpaint(frame, mask, 3, cv2.INPAINT_TELEA)
+        # fast: mask 轻度膨胀盖半透明边缘(单帧调用兜底; 管线内 processVideo
+        # 已有统一膨胀, 此处保持轻量)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        m = cv2.dilate(mask, k, iterations=1)
+        return cv2.inpaint(frame, m, 5, cv2.INPAINT_TELEA)
 
     def _inpaintLama(self, frame, mask):
         """
@@ -141,11 +145,14 @@ class Inpainter:
         动态尺寸模型: 整帧 pad 到 8 的倍数推理。
         """
         h, w = frame.shape[:2]
-        # LaMa 协议: 输入图像中 mask 区域必须置空(置 0), 且必须在裁剪/反射填充
-        # 之前作用于整帧 —— 否则 BORDER_REFLECT_101 会把水印文字镜像进填充区,
-        # 模型看到文字模式会原样重建文字
+        # LaMa 输入预处理(必须在裁剪/反射填充之前作用于整帧,
+        # 否则 BORDER_REFLECT_101 会把水印文字镜像进填充区, 模型会原样重建文字):
+        #   mask 区域不置纯黑(会导致模型生成偏暗的保守内容),
+        #   而是填充为"局部高斯模糊背景" —— 抹平水印笔画(信息消除),
+        #   同时保留背景色调, 模型在此基础上生成自然内容。
         frame = frame.copy()
-        frame[mask > 0] = 0
+        blurred = cv2.GaussianBlur(frame, (0, 0), 12)
+        frame[mask > 0] = blurred[mask > 0]
         if self._fixed_size is not None:
             th, tw = self._fixed_size
             # ── 固定尺寸模型: 水印区域裁剪推理(保留全分辨率质量) ──
@@ -184,11 +191,8 @@ class Inpainter:
                                      cv2.BORDER_CONSTANT, value=0)
             crop_out_h, crop_out_w = h + pad_h, w + pad_w
 
-        # LaMa 协议: 输入图像中 mask 区域必须置空(置 0),
-        # 否则模型会把可见的原始内容(如水印文字)原样保留
-        img = img.copy()
-        img[msk > 0] = 0
-
+        # 注: mask 区域已在上面用模糊背景填充(信息消除 + 保留色调),
+        # 此处不再置空, 避免模型生成偏暗内容
         img_t = img.astype(np.float32) / 255.0
         img_t = img_t.transpose(2, 0, 1)[np.newaxis, ...]      # (1,3,H,W)
         msk_t = (msk > 0).astype(np.float32)[np.newaxis, np.newaxis, ...]  # (1,1,H,W)

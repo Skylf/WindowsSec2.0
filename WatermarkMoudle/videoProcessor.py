@@ -262,6 +262,10 @@ def processVideo(input_path, output_path, masker, inpainter,
             t0 = time.time()
             mask = masker.getMask(frame, frames - 1)
             if mask is not None and mask.any():
+                # 统一膨胀(5x5 x2 ≈ 12px): 盖住半透明水印的浅色边缘与
+                # 细化漏检的笔画, 消除"淡化残留"(两种引擎共同受益)
+                k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                mask = cv2.dilate(mask, k5, iterations=2)
                 frame = inpainter.inpaint(frame, mask)
                 repaired += 1
             times.append((time.time() - t0) * 1000)
