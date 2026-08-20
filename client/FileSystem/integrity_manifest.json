@@ -1,0 +1,426 @@
+{
+  "generated_at": "2026-08-19 18:55:12",
+  "file_count": 84,
+  "files": {
+    "__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1787069701.9903033
+    },
+    "BsodMoudle\\aiAnalyzer.py": {
+      "sha256": "a8657dac93bae9a53dce9eed51f3b6fc14b27de92b9ab940f9dfcbd0b5826e8e",
+      "size": 4125,
+      "mtime": 1786792037.6672952
+    },
+    "BsodMoudle\\ai_config.json": {
+      "sha256": "a94a92b0b9245d093fa92db4691e7fd2bbff29aad6a60ff02bb22410e738aa42",
+      "size": 92,
+      "mtime": 1786934040.6042366
+    },
+    "BsodMoudle\\bsodDetector.py": {
+      "sha256": "07b86b0be3488f963ae32dce4f0c721ae5e49bf9d2a2e1143e725533b81a965e",
+      "size": 8160,
+      "mtime": 1786807301.2389307
+    },
+    "BsodMoudle\\bsodKnowledge.py": {
+      "sha256": "265fed7afa3e5cdf9e0b376d73ac296bb707e252e2845a8af15a3282fe9e0a1f",
+      "size": 9762,
+      "mtime": 1786792002.0851572
+    },
+    "BsodMoudle\\bsodReporter.py": {
+      "sha256": "4e52e2553018af2f59f9f8c19f04647691f93afe7694e97feb1df4ac0065f78a",
+      "size": 3459,
+      "mtime": 1786792027.396185
+    },
+    "BsodMoudle\\runTest.py": {
+      "sha256": "bd9fda77e121c118a1b443dcfbb84f9e99288ea507958b3e08543cecc9839477",
+      "size": 5951,
+      "mtime": 1786795559.661409
+    },
+    "BsodMoudle\\sample_bsod_events.xml": {
+      "sha256": "39e520d12f1475a9130a37492fbd064250ea6bce46c21994487dd966ac3f2209",
+      "size": 1908,
+      "mtime": 1786792741.8469667
+    },
+    "BsodMoudle\\__init__.py": {
+      "sha256": "6d22bcba66c94bcdd57a5be8ff7fe034713d3ae051e57e4f6ddadb9cf2e79e14",
+      "size": 410,
+      "mtime": 1786792042.233103
+    },
+    "CenterMoudle\\communicationModule.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1786759536.3082638
+    },
+    "CenterMoudle\\communicationObject.py": {
+      "sha256": "9ee4afc9b3d613b61d55ebfb1e40581a29a7668eb3df5ce86a7789b2755d8196",
+      "size": 11738,
+      "mtime": 1786760898.661117
+    },
+    "CenterMoudle\\freezeModule.py": {
+      "sha256": "52b40b4eb05b86bf1efc60b184dfb7c570cc9ab44e196d92afe67032a14e94ab",
+      "size": 3820,
+      "mtime": 1786857606.254996
+    },
+    "CenterMoudle\\log.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1786759575.8080673
+    },
+    "CenterMoudle\\observerModule.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1786759468.6228037
+    },
+    "CenterMoudle\\observerObject.py": {
+      "sha256": "b558016bfc0ac21349473ae3c23ef950387c47561cf4918b7009e9c1c1c97db5",
+      "size": 7041,
+      "mtime": 1786761449.5648377
+    },
+    "CenterMoudle\\securityModule.py": {
+      "sha256": "058b2b1ad7f30320851fab336abffabd83b5c189c7c7d608a50b6f5a79e36187",
+      "size": 6096,
+      "mtime": 1786807200.0010002
+    },
+    "CenterMoudle\\watermarkModule.py": {
+      "sha256": "a0f1ae05784aa13aa8adc73a4f2f914ce9fd96a8f4588eab119ad1054558e0a2",
+      "size": 8023,
+      "mtime": 1786873121.36196
+    },
+    "CenterMoudle\\__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1787069712.5038538
+    },
+    "FaceMoudle\\modelConfig.py": {
+      "sha256": "970ee7107ed4780fca667d6db8aff95684218f4de66cb2e8628e0a31421115be",
+      "size": 4148,
+      "mtime": 1786756136.2260883
+    },
+    "FaceMoudle\\__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1787069720.19243
+    },
+    "FaceMoudle\\faceDetecter\\faceDataGetter.py": {
+      "sha256": "79af1b42c634a173a32c5aabc50335685a10331a4cc99eaa4e7234cf274ab1f3",
+      "size": 20890,
+      "mtime": 1786790974.7857938
+    },
+    "FaceMoudle\\faceDetecter\\runTest.py": {
+      "sha256": "cdecfe11df47949fb1f32cc4aa8b163eb189837980fe54fbbd6ac0bfd82441ad",
+      "size": 4111,
+      "mtime": 1786613823.4558458
+    },
+    "FaceMoudle\\faceDetecter\\__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1786545077.6354241
+    },
+    "FaceMoudle\\faceInputer\\faceEnroll.py": {
+      "sha256": "1726af2c45721b4590e0dd3dd27317fdff23777aacc3007a43d3834db1c63c37",
+      "size": 4342,
+      "mtime": 1786784799.0640304
+    },
+    "FaceMoudle\\faceInputer\\inputter.py": {
+      "sha256": "9146f949f7245ab33930955d72212e28d349d08c9aa174bfec77f768130255e0",
+      "size": 38219,
+      "mtime": 1787068202.1462095
+    },
+    "FaceMoudle\\faceInputer\\runTest.py": {
+      "sha256": "368e8c9c825c580a00da5fbaef21bb6b0dee2f3a192baf2b324c7a8713d2e878",
+      "size": 5796,
+      "mtime": 1787068202.1462095
+    },
+    "FaceMoudle\\faceInputer\\__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1786445302.830329
+    },
+    "FaceMoudle\\facialRecognition\\recognition.py": {
+      "sha256": "fe73709a0f3c9a8563d1a926ec273bae15de02143cfe485597728e26670f41af",
+      "size": 18184,
+      "mtime": 1787068202.1462095
+    },
+    "FaceMoudle\\facialRecognition\\runTest.py": {
+      "sha256": "2564dfdc9268e540a2d259f47b04198b01b5a2e915a46db7b8b923d2e1cafbc2",
+      "size": 9677,
+      "mtime": 1787068202.1421845
+    },
+    "FaceMoudle\\facialRecognition\\__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1786547243.3564582
+    },
+    "FaceMoudle\\liveness\\livenessDetector.py": {
+      "sha256": "cef6d379217184ecdfac58b998062e0c1f8f54840eeeea4f10284a0b0651615f",
+      "size": 36305,
+      "mtime": 1787068202.1564107
+    },
+    "FaceMoudle\\liveness\\silentLiveness.py": {
+      "sha256": "baf92cba555ff35dace11f915ac982616d458c3f197e577aa3fffe8c794f5222",
+      "size": 8427,
+      "mtime": 1787068202.153371
+    },
+    "FaceMoudle\\liveness\\__init__.py": {
+      "sha256": "bcac9dd47d86584746ceba65fb382753376a1176042bdcd582c45dc41248ff28",
+      "size": 691,
+      "mtime": 1787068202.1462095
+    },
+    "FaceMoudle\\moudleTrainner\\__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1786445243.052189
+    },
+    "FaceMoudle\\service\\faceService.py": {
+      "sha256": "245b5c326ff3aee81e1f23b7df2e7a1add68e5e0e11a5a29e69f9202bd0b7904",
+      "size": 15078,
+      "mtime": 1786790981.2881122
+    },
+    "FaceMoudle\\service\\worker.py": {
+      "sha256": "e3f547db709fdd72b3c07eb0b134d17bb077954f8567ee5e6903c2888676d303",
+      "size": 2772,
+      "mtime": 1786762426.6521602
+    },
+    "FaceMoudle\\service\\__init__.py": {
+      "sha256": "39a5e088a3df7e6d7211221e2c63fed193f2672cd02cd5e8d018094d15c6e1b3",
+      "size": 312,
+      "mtime": 1786762446.2732632
+    },
+    "FreezeMoudle\\freezeConfig.py": {
+      "sha256": "f557ed14f96801e62db9d0d2bcc813a12f6d360f3b3ee57c43ccd2dac4568d25",
+      "size": 3219,
+      "mtime": 1786850419.8839214
+    },
+    "FreezeMoudle\\freezeMonitor.py": {
+      "sha256": "5fa7f66446bdd182680497909272d0e01a1937d4df898f1d54c30bafce2bacb0",
+      "size": 17135,
+      "mtime": 1786850559.9084687
+    },
+    "FreezeMoudle\\freezeReporter.py": {
+      "sha256": "719e9a89641963a9c8d686bf6fb3f89441d788871f522c2908bb7ada0dac1d5b",
+      "size": 2284,
+      "mtime": 1786845847.4517071
+    },
+    "FreezeMoudle\\freeze_config.json": {
+      "sha256": "25ae762f4efcca454509e0865002e527bdf87251fda7a108bd393f88c8a56fa3",
+      "size": 490,
+      "mtime": 1786934063.9224203
+    },
+    "FreezeMoudle\\runTest.py": {
+      "sha256": "f9b0745a6a0686d6b7d2d79adaece8a7cbf2dfea8e64df8d895d8e27ff885b09",
+      "size": 10040,
+      "mtime": 1786845873.0158138
+    },
+    "FreezeMoudle\\__init__.py": {
+      "sha256": "82479e0027f10c0708d54f835c0992f42ed754b3c45eb2caf9ef1417c397236a",
+      "size": 453,
+      "mtime": 1786845878.1276827
+    },
+    "FreezeMoudle\\simulator\\README.md": {
+      "sha256": "f43e620b5ae6d9133fc6cba2df08173148d0c4d01eee4584e516e0d41825beae",
+      "size": 2120,
+      "mtime": 1786846558.179816
+    },
+    "FreezeMoudle\\simulator\\simulate.py": {
+      "sha256": "db84286bea9ee7851e14ce17b92b23bf3dcc3065944bbfaaaf7512932468d792",
+      "size": 3989,
+      "mtime": 1786846547.815377
+    },
+    "FreezeMoudle\\simulator\\sim_cpu.py": {
+      "sha256": "7da6cb6ff578ba0ba6bb5fd3bad784355f436a6cd34007272a2520d404da12cf",
+      "size": 2274,
+      "mtime": 1786846694.0676148
+    },
+    "FreezeMoudle\\simulator\\sim_disk_full.py": {
+      "sha256": "f684557a6b7300556c7624d1d4439dd7316b6102b7c5ab039f2295c11ac31b33",
+      "size": 2530,
+      "mtime": 1786846522.242806
+    },
+    "FreezeMoudle\\simulator\\sim_disk_io.py": {
+      "sha256": "1dce049fde2edc388b2750bcabe21e1637658b4cee6865eba9e32c7bb3a6aa88",
+      "size": 2367,
+      "mtime": 1786846513.2762418
+    },
+    "FreezeMoudle\\simulator\\sim_memory.py": {
+      "sha256": "b66b098711777de9531e70500cb78a055e072caca84c9462ed82e3514e703542",
+      "size": 1848,
+      "mtime": 1786846505.5367372
+    },
+    "FreezeMoudle\\simulator\\sim_process_storm.py": {
+      "sha256": "a9051c5385db0b70c33bec528cd845c73b3a1ed21ae34af6abf970f5780ce204",
+      "size": 2416,
+      "mtime": 1786846529.499796
+    },
+    "FreezeMoudle\\simulator\\sim_ui_freeze.py": {
+      "sha256": "b41a775198ae25d81d001bd85408e784e2a6156aab8a117132e4d49fea342c87",
+      "size": 1625,
+      "mtime": 1786846536.9484317
+    },
+    "FreezeMoudle\\simulator\\__init__.py": {
+      "sha256": "ab5669a0b757d5f4bbdcbfe035cfc791123fcf4bf7665c40f95ccec457783602",
+      "size": 524,
+      "mtime": 1786846564.9692738
+    },
+    "LogSystem\\logConfig.py": {
+      "sha256": "22ca6c45cfbf1d922cb291e6238295bbd7f39d57fb6103395cfd2f86c7fd155b",
+      "size": 2602,
+      "mtime": 1787133137.6326725
+    },
+    "LogSystem\\logManager.py": {
+      "sha256": "1afed47f499ef9c0c22a4adf2738c9ef68d5a69fc10544e4cecca114f6251e1b",
+      "size": 7213,
+      "mtime": 1787135919.7153654
+    },
+    "LogSystem\\runTest.py": {
+      "sha256": "2f73cd68ea9a3373ed76d0c81460a4a0dbff801723684742cbcbf5c55859cd7e",
+      "size": 2235,
+      "mtime": 1787136397.457817
+    },
+    "LogSystem\\__init__.py": {
+      "sha256": "11ceb2d24ffa7353ad48de34bd867085e4029cc006aae7a6d9b3a8c3f41e2339",
+      "size": 18,
+      "mtime": 1787133232.3619528
+    },
+    "SocketModule\\authService.py": {
+      "sha256": "382bd8f457f62351e04c0091a56d041c0604b3d31799396671e5b98a2249ca26",
+      "size": 7217,
+      "mtime": 1787133606.99873
+    },
+    "SocketModule\\client.py": {
+      "sha256": "5e63e6d642f949905be97a9aca065880c0720ccbbbd9a9b908b9466424c8818d",
+      "size": 7637,
+      "mtime": 1787133449.2928379
+    },
+    "SocketModule\\networkManager.py": {
+      "sha256": "731708064faa9fda4f5a9a218780f4d245242c3a518dd73ed96a4233b694bd4c",
+      "size": 6884,
+      "mtime": 1787133510.896432
+    },
+    "SocketModule\\protocol.py": {
+      "sha256": "6829923927c2d2a1f5afd677ec77cc7ede3120eaa5530cc13c6743b01cf41278",
+      "size": 3534,
+      "mtime": 1787128730.4752374
+    },
+    "SocketModule\\runTest.py": {
+      "sha256": "a882bb2ad4082097613d3f63a6a4f1460aeae2c070a7b49faeaaae0a51611188",
+      "size": 5843,
+      "mtime": 1787129366.0284548
+    },
+    "SocketModule\\__init__.py": {
+      "sha256": "094ca856702f4c0b8f820375c2665b2f5d50f8e2f5ee29a6f5adcb03a3c38fe7",
+      "size": 21,
+      "mtime": 1787128860.525689
+    },
+    "UI\\__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1787069727.9448824
+    },
+    "UI\\FaceModuleUI\\appConfig.py": {
+      "sha256": "0b30a6b1ce84699b949125fea6793bd3226c50c29bbbecb2aedf96da76e379a6",
+      "size": 2694,
+      "mtime": 1786896098.0308685
+    },
+    "UI\\FaceModuleUI\\currentUser.py": {
+      "sha256": "2e6a382a6ef3c89b6cdec6cb18609300a2b67c5ed0fcd0c0dafaf42aa6fdb754",
+      "size": 2349,
+      "mtime": 1787127794.1453912
+    },
+    "UI\\FaceModuleUI\\integrityDialog.py": {
+      "sha256": "f496b0b15bbe364f1fb00ee832c39c66b2dc6960eeab207ca653ef579c16f616",
+      "size": 5874,
+      "mtime": 1787131051.7072146
+    },
+    "UI\\FaceModuleUI\\loginPage.py": {
+      "sha256": "c7c37b5f209fe45afcedacd5880a0c021bdb3e74083c6fdeae33681879022614",
+      "size": 20508,
+      "mtime": 1787133754.1345146
+    },
+    "UI\\FaceModuleUI\\runTest.py": {
+      "sha256": "b00ddf70fdae6e3d0c93ce77fd6f951d91cbfa25a709c8a2d865cd2aa45aea9e",
+      "size": 3196,
+      "mtime": 1786868746.2151167
+    },
+    "UI\\FaceModuleUI\\texts.py": {
+      "sha256": "94cdf249b28579c418bf86a35543462b6c493c728c9811f766220e68de2eaa8e",
+      "size": 33600,
+      "mtime": 1787129799.7607236
+    },
+    "UI\\FaceModuleUI\\threadBridge.py": {
+      "sha256": "816bae306c120633b1ef8f2ae1441c2340d0a8c49460f9f3ced6b3ea370d4426",
+      "size": 1984,
+      "mtime": 1786785435.493146
+    },
+    "UI\\FaceModuleUI\\UI.py": {
+      "sha256": "2391552ac81aea9aa4ff9204615aaebd36bf6babfe88665041fc8d3a236b4cfd",
+      "size": 118935,
+      "mtime": 1787129034.7751503
+    },
+    "UI\\FaceModuleUI\\UI_object.py": {
+      "sha256": "9ad7eb782593d8eb09d8568c4b47f2f0e68ed24062ea509df50cdf1cb0b9063c",
+      "size": 30604,
+      "mtime": 1786873138.6857595
+    },
+    "UI\\FaceModuleUI\\userInfo.py": {
+      "sha256": "bd0f361af627fc62fae582b4706fb018627762cac6c6339723db95e5f44db719",
+      "size": 1937,
+      "mtime": 1787127794.208593
+    },
+    "UI\\FaceModuleUI\\__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "mtime": 1787069727.9408743
+    },
+    "UI\\FaceModuleUI\\style\\main.qss": {
+      "sha256": "9c6472f00a4feb823f912bf94cd074a566d7b30c0e92e62afe79b44762830363",
+      "size": 12482,
+      "mtime": 1787128393.6815925
+    },
+    "UI\\FaceModuleUI\\style\\__init__.py": {
+      "sha256": "f01663c6255677abdaf8df992016a7c4a53552fe89daf685b252f0dbf220d922",
+      "size": 1246,
+      "mtime": 1786763617.2831047
+    },
+    "WatermarkMoudle\\gpuDetector.py": {
+      "sha256": "f8b36371650ce20995505b7d8d5809faf77880ffcfabfd798b97f2b4b4930eee",
+      "size": 6459,
+      "mtime": 1787070488.7290893
+    },
+    "WatermarkMoudle\\inpainter.py": {
+      "sha256": "6742567eeeaeb8f03a281b7bf8180864ebf8fe19c1e26fc03a2b2ee10892b78b",
+      "size": 10354,
+      "mtime": 1786933593.2324638
+    },
+    "WatermarkMoudle\\log.py": {
+      "sha256": "69dc92f4d25f266f7e75e1e58cb61c803e07d1a6b41e55b97d36148249de1607",
+      "size": 1301,
+      "mtime": 1786873024.6995938
+    },
+    "WatermarkMoudle\\runTest.py": {
+      "sha256": "a814eea55ab268c9ff354bff5327ac737f99b50530383c5b0b38d8adff6c334b",
+      "size": 7791,
+      "mtime": 1787070488.7255628
+    },
+    "WatermarkMoudle\\videoProcessor.py": {
+      "sha256": "a676fe725044eea7590eafa4ff86177d579c8d5dea650fde4ac02a63f1b44650",
+      "size": 17108,
+      "mtime": 1787070488.7221553
+    },
+    "WatermarkMoudle\\watermarkConfig.py": {
+      "sha256": "aa02f470b933a3909f8128ec6941d260639855f94b7a1e0ebafa4e1e8ba7753d",
+      "size": 3253,
+      "mtime": 1786884020.1306593
+    },
+    "WatermarkMoudle\\watermarkDetector.py": {
+      "sha256": "94a123250d25fb39dc23b109b97e40917c11b8ebdc5544d672e528f7dd0caddc",
+      "size": 25850,
+      "mtime": 1786887846.1475768
+    },
+    "WatermarkMoudle\\__init__.py": {
+      "sha256": "96c0336890ea58302379a44beaf5db8e7018963e475b015242ccede2a8feeded",
+      "size": 575,
+      "mtime": 1786868393.9754665
+    }
+  }
+}

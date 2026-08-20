@@ -32,22 +32,25 @@ logs/
 temp/
 
 # === AI 配置(含 api key, 不进 git) ===
-BsodMoudle/ai_config.json
+client/BsodMoudle/ai_config.json
 
 # === 卡死检测本地配置(用户阈值, 不进 git) ===
-FreezeMoudle/freeze_config.json
+client/FreezeMoudle/freeze_config.json
 
 # === 视频去水印本地配置(不进 git) ===
-WatermarkMoudle/watermark_config.json
+client/WatermarkMoudle/watermark_config.json
 
 # === 视频去水印模型(约 200MB, 不进 git, 见 models/README.md) ===
-WatermarkMoudle/models/*.onnx
+client/WatermarkMoudle/models/*.onnx
 
 # === 缓存目录(采集的原始图片等,不进 git) ===
-cache/
+client/cache/
+
+# === 用户系统数据库(运行时生成, 不进 git) ===
+Server/UserSystem/DataBase/
 
 # === 临时测试结果与调试文件 ===
 test/a
 test/b
 out_*.txt
-FaceMoudle/liveness/landmark_debug.jpg
+client/FaceMoudle/liveness/landmark_debug.jpg

@@ -16,7 +16,7 @@ import numpy as np
 projectRoot = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, projectRoot)
 
-from FaceMoudle.faceInputer.inputter import faceCheck, handleNoFace, coverDict
+from client.FaceMoudle.faceInputer import faceCheck, handleNoFace, coverDict
 
 
 def makeNoFaceImages(targetDir, count=2):
